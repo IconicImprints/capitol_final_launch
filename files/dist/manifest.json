@@ -1,0 +1,28 @@
+{
+  "name": "Kickday",
+  "short_name": "Kickday",
+  "description": "Daily accountability rooms — build streaks, level up, and crush your goals together.",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "categories": ["productivity", "social", "lifestyle"],
+  "lang": "en-US",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "splash_pages": null
+}
