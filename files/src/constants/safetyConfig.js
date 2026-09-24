@@ -134,13 +134,13 @@ export const ACTIVITY_BURST_COOLDOWN_MS = 30000;   // 30s cooldown after burst
 
 // ── Community Safety Guidelines (shared by SafetyView + the post-onboarding gate) ─
 export const COMMUNITY_GUIDELINES = [
-  ["✅ Be real", "Only submit genuine proof of your work. Faking proofs is cheating and will result in removal."],
-  ["✅ Be respectful", "Competitive is good. Cruel is not. No personal insults, slurs, threats, or targeted harassment."],
-  ["✅ Keep it on-platform", "Do not solicit contact info or attempt to move conversations off Kickday. This includes sharing phone numbers, social media handles, or messaging app usernames."],
-  ["✅ Protect personal information", "Do not share your own or anyone else's address, school, phone number, or location."],
-  ["✅ No sexual content", "Zero tolerance. Any sexual content involving minors results in immediate permanent ban and escalation."],
-  ["✅ No spam or scams", "No repeated identical messages, unsolicited promotions, fake giveaways, or phishing links."],
-  ["✅ No impersonation", "Don't pretend to be another user, a moderator, or a Kickday employee."],
-  ["✅ Age-appropriate content", "All content must be appropriate for users aged 13+."],
-  ["✅ Respect room rules", "Follow the goals and rules of any room you join. Disrupting rooms or refusing to participate is grounds for removal."],
+  ["Be real", "Only submit genuine proof of your work. Faking proofs is cheating and will result in removal."],
+  ["Be respectful", "Competitive is good. Cruel is not. No personal insults, slurs, threats, or targeted harassment."],
+  ["Keep it on-platform", "Do not solicit contact info or attempt to move conversations off Capitol. This includes sharing phone numbers, social media handles, or messaging app usernames."],
+  ["Protect personal information", "Do not share your own or anyone else's address, school, phone number, or location."],
+  ["No sexual content", "Zero tolerance. Any sexual content involving minors results in immediate permanent ban and escalation."],
+  ["No spam or scams", "No repeated identical messages, unsolicited promotions, fake giveaways, or phishing links."],
+  ["No impersonation", "Don't pretend to be another user, a moderator, or a Capitol employee."],
+  ["Age-appropriate content", "All content must be appropriate for users aged 13+."],
+  ["Respect room rules", "Follow the rules of any room you join. Disrupting rooms or refusing to participate is grounds for removal."],
 ];

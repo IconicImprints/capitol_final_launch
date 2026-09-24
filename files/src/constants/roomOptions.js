@@ -35,12 +35,12 @@ export const GOAL_TEMPLATES = [
 ];
 
 export const ELITE_ROLES = [
-  { id: "captain",    label: "Captain",    desc: "Leads the room, pins announcements, can kick members",         color: "#f59e0b", icon: "⚡" },
-  { id: "coach",      label: "Coach",      desc: "Guides members, posts daily prompts, reviews proofs",          color: "#818cf8", icon: "🎯" },
-  { id: "enforcer",   label: "Enforcer",   desc: "Monitors compliance, flags late submissions, issues warnings", color: "#ef4444", icon: "🛡" },
-  { id: "analyst",    label: "Analyst",    desc: "Tracks group stats, posts weekly summaries",                   color: "#10b981", icon: "📊" },
-  { id: "motivator",  label: "Motivator",  desc: "Boosts morale, celebrates wins, sends encouragement",         color: "#f97316", icon: "🔥" },
-  { id: "member",     label: "Member",     desc: "Standard participant — submit daily proof, support teammates", color: "#6b7280", icon: "👤" },
+  { id: "captain",    label: "Captain",    desc: "Leads the room, pins announcements, can kick members",         color: "#f59e0b", icon: "" },
+  { id: "coach",      label: "Coach",      desc: "Guides members, posts daily prompts, reviews proofs",          color: "#818cf8", icon: "" },
+  { id: "enforcer",   label: "Enforcer",   desc: "Monitors compliance, flags late submissions, issues warnings", color: "#ef4444", icon: "" },
+  { id: "analyst",    label: "Analyst",    desc: "Tracks group stats, posts weekly summaries",                   color: "#10b981", icon: "" },
+  { id: "motivator",  label: "Motivator",  desc: "Boosts morale, celebrates wins, sends encouragement",         color: "#f97316", icon: "" },
+  { id: "member",     label: "Member",     desc: "Standard participant — submit daily proof, support teammates", color: "#6b7280", icon: "" },
 ];
 export const AGE_GROUPS = [
   { id: "13-17",  label: "13–17",  desc: "Teens" },
@@ -68,17 +68,17 @@ export const ROOM_NAME_VIBE_WORDS = [
 
 export const AGE_OPTIONS = ["13–17", "18–24", "25–34", "35–44", "45–54", "55+"];
 export const INTEREST_OPTIONS = [
-  { key: "coding",    icon: "code", label: "Coding / Dev"   },
-  { key: "fitness",   icon: "", label: "Fitness"        },
-  { key: "writing",   icon: "", label: "Writing"        },
-  { key: "design",    icon: "", label: "Design"         },
-  { key: "reading",   icon: "", label: "Reading"        },
-  { key: "wellness",  icon: "", label: "Wellness"       },
-  { key: "business",  icon: "chart", label: "Business"       },
-  { key: "music",     icon: "star", label: "Music"          },
-  { key: "language",  icon: "globe", label: "Languages"      },
-  { key: "art",       icon: "design_portfolio", label: "Art"            },
-  { key: "other",     icon: "", label: "Other"          },
+  { key: "coding",    icon: "code", label: "Coding / Dev"},
+  { key: "fitness",   icon: "workout", label: "Fitness"},
+  { key: "writing",   icon: "write_daily", label: "Writing"},
+  { key: "design",    icon: "design_portfolio", label: "Design"},
+  { key: "reading",   icon: "read_books", label: "Reading"},
+  { key: "wellness",  icon: "mindfulness", label: "Wellness"},
+  { key: "business",  icon: "chart", label: "Business"},
+  { key: "music",     icon: "star", label: "Music"},
+  { key: "language",  icon: "globe", label: "Languages"},
+  { key: "art",       icon: "design_portfolio", label: "Art"},
+  { key: "other",     icon: "bolt", label: "Other"},
 ];
 export const INTEREST_TO_GOAL = {
   coding: "saas_mvp", fitness: "run_5k", writing: "write_daily",
@@ -91,8 +91,8 @@ export const INTEREST_TO_GOAL = {
 // Collects: niche, ageRange, primaryGoal, motivation.
 export const NICHE_OPTIONS = [
   { value:"coding",  label:"Coding / Building", desc:"Apps, SaaS, side projects" },
-  { value:"video",   label:"  Video / Content",   desc:"Editing, YouTube, content" },
-  { value:"design",  label:"  Design / UI·UX",    desc:"Figma, branding, visuals" },
+  { value:"video",   label:"Video / Content",   desc:"Editing, YouTube, content" },
+  { value:"design",  label:"Design / UI·UX",    desc:"Figma, branding, visuals" },
   { value:"startup", label:"Startup / Business",desc:"Revenue, growth, clients" },
   { value:"fitness", label:"Fitness",            desc:"Gym, running, habits" },
 ];
@@ -107,9 +107,9 @@ export const AGE_RANGE_OPTIONS = [
 
 export const PRIMARY_GOAL_OPTIONS = [
   { value: "ship_project",   label: "Ship a project",      desc: "Build something real" },
-  { value: "build_habit",    label: "  Build a daily habit",  desc: "Consistency over time" },
+  { value: "build_habit",    label: "Build a daily habit",  desc: "Consistency over time" },
   { value: "lose_weight",    label: "Lose weight / get fit", desc: "Body transformation" },
   { value: "learn_skill",    label: "Learn a new skill",    desc: "Course, language, cert" },
   { value: "grow_business",  label: "Grow my business",     desc: "Revenue, clients, reach" },
-  { value: "other",          label: "  Something else",       desc: "My own goal" },
+  { value: "other",          label: "Something else",       desc: "My own goal" },
 ];

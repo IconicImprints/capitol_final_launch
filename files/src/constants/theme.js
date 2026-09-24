@@ -28,32 +28,6 @@ export const THEMES = {
     hoverBg: "rgba(255,255,255,0.04)", activeBg: "rgba(255,255,255,0.08)",
     isDark: true,
   },
-  cyan: {
-    bg: "#f0fbfc", surface: "#ffffff", surfaceAlt: "#e8f8fa",
-    border: "#cef0f5", borderStrong: "#a8e4ec",
-    text: "#0e3a40", textMuted: "#4a8a92", textFaint: "#7ab8c0",
-    headerBg: "#ffffff", navActiveBg: "#e0f5f8",
-    inputBg: "#e8f8fa", inputFocus: "#ffffff", inputText: "#0e3a40",
-    successBg: "#f0fdf4", successBorder: "#bbf7d0", successText: "#15803d",
-    errorBg: "#fef2f2", errorBorder: "#fecaca", errorText: "#dc2626",
-    warnBg: "#fff7ed", warnBorder: "#fed7aa", warnText: "#c2410c",
-    infoBg: "#fefce8", infoBorder: "#fde047", infoText: "#4a8a92",
-    hoverBg: "rgba(0,80,90,0.05)", activeBg: "rgba(0,80,90,0.09)",
-    isDark: false,
-  },
-  pink: {
-    bg: "#fdf5f8", surface: "#ffffff", surfaceAlt: "#faeef3",
-    border: "#f5d8e8", borderStrong: "#eeb8d0",
-    text: "#3a1020", textMuted: "#8a4060", textFaint: "#c080a0",
-    headerBg: "#ffffff", navActiveBg: "#faebf2",
-    inputBg: "#faeef3", inputFocus: "#ffffff", inputText: "#3a1020",
-    successBg: "#f0fdf4", successBorder: "#bbf7d0", successText: "#15803d",
-    errorBg: "#fef2f2", errorBorder: "#fecaca", errorText: "#dc2626",
-    warnBg: "#fff7ed", warnBorder: "#fed7aa", warnText: "#c2410c",
-    infoBg: "#fefce8", infoBorder: "#fde047", infoText: "#8a4060",
-    hoverBg: "rgba(80,0,30,0.04)", activeBg: "rgba(80,0,30,0.07)",
-    isDark: false,
-  },
 };
 
 export const SHARED = {

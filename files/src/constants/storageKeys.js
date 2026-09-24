@@ -15,9 +15,9 @@ export const ANON_MAP_LS_PREFIX = "kd_anon_map_";
 export const TYPING_LS_PREFIX = "kd_typing_";
 export const TYPING_TTL_MS = 3000;
 
-export const LS_KEY = "kickday_data"; // unused
+export const LS_KEY = "capitol_data"; // unused
 export const LS_ACHIEVEMENTS = "kd_achievements";
 export const LS_LAST_SEEN_LEVEL = "kd_last_seen_level";
 
 // ── Discord community integration ─────────────────────────────────────────────
-export const DISCORD_INVITE_URL = "https://discord.gg/kickday";
+export const DISCORD_INVITE_URL = "https://discord.gg/capitol";

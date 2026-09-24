@@ -1,12 +1,16 @@
 {
-  "name": "kickday",
+  "name": "capitol",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:frontend": "vite",
+    "dev:api": "npm --prefix server start",
     "build": "vite build",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "start": "node scripts/start.mjs",
+    "start:api": "npm --prefix server start"
   },
   "dependencies": {
     "react": "^18.3.1",
