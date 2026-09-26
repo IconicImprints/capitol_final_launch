@@ -25,6 +25,7 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const requestUrl = new URL(event.request.url);
+  if (requestUrl.pathname.startsWith("/_vercel/")) return;
   if (requestUrl.pathname === "/" || requestUrl.pathname === "/index.html" ||
       requestUrl.pathname.startsWith("/assets/")) {
     event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
