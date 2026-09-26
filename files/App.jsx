@@ -16,6 +16,7 @@ import {
   fbSubscribeUser,
   fbGetCloseFriends, fbGetCloseFriendRequests, fbSendCloseFriendRequest,
   fbRespondCloseFriendRequest, fbRemoveCloseFriend,
+  fbJoinWaitingQueue, fbLeaveWaitingQueue, fbGetWaitingQueueStatus,
   lsGet, lsSet,
   KDSound, useUserState, uploadFile,
   todayStr, calcLevel, calcLeague, daysBetween,
@@ -1606,6 +1607,18 @@ function KDSkull({ size = 24, animate = false }) {
   );
 }
 
+function KDClock({ size = 24, animate = false }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" style={{ flexShrink:0, animation: animate ? "kd-pulse 2s ease-in-out infinite" : "none", display:"inline-block" }}>
+      <circle cx="16" cy="16" r="14" stroke="#F59E0B" strokeWidth="2" fill="none" />
+      <circle cx="16" cy="16" r="2" fill="#F59E0B" />
+      <line x1="16" y1="16" x2="16" y2="8" stroke="#F59E0B" strokeWidth="2" strokeLinecap="round" />
+      <line x1="16" y1="16" x2="22" y2="16" stroke="#F59E0B" strokeWidth="2" strokeLinecap="round" />
+      <line x1="16" y1="16" x2="19" y2="20" stroke="#F59E0B" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // ── KD Crossed-swords — challenge ─────────────────────────────────────────────
 function KDSwords({ size = 24, animate = false }) {
   return (
@@ -2772,16 +2785,17 @@ function buildProofRecord({ file, preview, link, text, userInit, userName, userC
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Auto-match modal: goal picker → interview → room assignment ────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-function AutoMatchModal({ open, onClose, rooms = [], onMatched }) {
+function AutoMatchModal({ open, onClose, rooms = [], onMatched, profile = {} }) {
   const { T } = useTheme();
-  const [phase, setPhase] = useState("idle"); // idle | matching | found
+  const [phase, setPhase] = useState("idle"); // idle | matching | found | queued
   const [progress, setProgress] = useState(0);
   const [matchedRoom, setMatchedRoom] = useState(null);
   const [dots, setDots] = useState(0);
+  const [queueStatus, setQueueStatus] = useState(null);
   const roomList = Array.isArray(rooms) ? rooms : [];
 
   useEffect(() => {
-    if (!open) { setPhase("idle"); setProgress(0); setMatchedRoom(null); }
+    if (!open) { setPhase("idle"); setProgress(0); setMatchedRoom(null); setQueueStatus(null); }
     else { setPhase("matching"); }
   }, [open]);
 
@@ -2793,22 +2807,60 @@ function AutoMatchModal({ open, onClose, rooms = [], onMatched }) {
       if (p >= 100) {
         p = 100;
         clearInterval(interval);
-        // Automatch logic: pick best available room
-        const available = roomList.filter(r => (r.members ?? 0) < (r.max ?? 8));
-        const best = available.length > 0
-          ? available[Math.floor(Math.random() * Math.min(3, available.length))]
-          : roomList[0] || null;
-        setMatchedRoom(best);
-        setPhase("found");
-        // Pass the full match payload — callers expect { room, isNew, rooms }
-        setTimeout(() => {
-          if (best) onMatched({ room: best, isNew: false, rooms: roomList });
-        }, 1200);
+        
+        // Try to join waiting queue for auto-replacement
+        const joinQueue = async () => {
+          try {
+            const result = await fbJoinWaitingQueue({
+              niche: profile?.niche || "",
+              ageRange: profile?.ageRange || ""
+            });
+            
+            if (result.matched) {
+              // Immediate match found
+              const room = roomList.find(r => r.id === result.roomId);
+              setMatchedRoom(room);
+              setPhase("found");
+              setTimeout(() => {
+                if (room) onMatched({ room, isNew: false, rooms: roomList });
+              }, 1200);
+            } else if (result.queued) {
+              // Added to waiting queue
+              setQueueStatus(result);
+              setPhase("queued");
+            } else {
+              // Fallback to existing automatch logic
+              const available = roomList.filter(r => (r.members ?? 0) < (r.max ?? 8));
+              const best = available.length > 0
+                ? available[Math.floor(Math.random() * Math.min(3, available.length))]
+                : roomList[0] || null;
+              setMatchedRoom(best);
+              setPhase("found");
+              setTimeout(() => {
+                if (best) onMatched({ room: best, isNew: false, rooms: roomList });
+              }, 1200);
+            }
+          } catch (error) {
+            console.error("Queue join error:", error);
+            // Fallback to existing logic
+            const available = roomList.filter(r => (r.members ?? 0) < (r.max ?? 8));
+            const best = available.length > 0
+              ? available[Math.floor(Math.random() * Math.min(3, available.length))]
+              : roomList[0] || null;
+            setMatchedRoom(best);
+            setPhase("found");
+            setTimeout(() => {
+              if (best) onMatched({ room: best, isNew: false, rooms: roomList });
+            }, 1200);
+          }
+        };
+        
+        joinQueue();
       }
       setProgress(p);
     }, 100);
     return () => clearInterval(interval);
-  }, [phase]);
+  }, [phase, profile, roomList, onMatched]);
 
   useEffect(() => {
     if (phase !== "matching") return;
@@ -2864,6 +2916,27 @@ function AutoMatchModal({ open, onClose, rooms = [], onMatched }) {
               ))}
             </div>
           </>
+        )}
+        {phase === "queued" && (
+          <div style={{ textAlign: "center" }}>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:12}}><KDClock size={52} animate={true}/></div>
+            <div style={{ fontWeight: 800, fontSize: 18, color: T.text, marginBottom: 4 }}>Added to waiting queue</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 16 }}>
+              We'll match you with a room when a slot opens up. You'll be notified automatically.
+            </div>
+            <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "14px", marginTop: 16 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Queue position</div>
+              <div style={{ fontWeight: 700, fontSize: 24, color: SHARED.yellow }}>
+                #{queueStatus?.queueSize || 1}
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>
+                people waiting for rooms
+              </div>
+            </div>
+            <div style={{ marginTop: 20 }}>
+              <Btn variant="ghost" onClick={onClose}>Close</Btn>
+            </div>
+          </div>
         )}
         {phase === "found" && matchedRoom && (
           <div style={{ textAlign: "center" }}>
@@ -3645,8 +3718,9 @@ function SafetyGate({ onAccept, displayName }) {
 // No fake member status data — only real user state is used
 // MEMBER_STATUS_DATA moved to src/constants/sampleData.js
 
-function getMemberStatus(missedDays, submittedToday, kicked) {
+function getMemberStatus(missedDays, submittedToday, kicked, kickStatus) {
   if (kicked) return "kicked";
+  if (kickStatus === "inactive") return "inactive";
   if (missedDays >= 2) return "at_risk";
   if (missedDays >= 1 || !submittedToday) return "flagged";
   return "active";
@@ -3658,6 +3732,7 @@ function MemberStatusBadge({ status }) {
     active:   { label: "Active",   bg: T.successBg,  color: T.successText,  border: T.successBorder },
     flagged:  { label: "Not yet",  bg: T.isDark ? "rgba(245,200,0,0.1)" : SHARED.yellowLight, color: T.isDark ? "#fbbf24" : "#92400e", border: SHARED.yellowBorder },
     at_risk:  { label: "At Risk",  bg: T.warnBg,     color: T.warnText,     border: T.warnBorder },
+    inactive: { label: "Inactive", bg: T.isDark ? "rgba(107,114,128,0.1)" : "#f3f4f6", color: T.isDark ? "#9ca3af" : "#6b7280", border: T.isDark ? "#374151" : "#d1d5db" },
     kicked:   { label: "Kicked",   bg: T.errorBg,    color: T.errorText,    border: T.errorBorder },
   };
   const c = configs[status] || configs.flagged;
@@ -3792,11 +3867,25 @@ function RoomMemberStatusList({ members, userState, submittedToday, me, allUsers
         const isMe = me && (init === me.init || init === me.userId);
         const presence = presenceMap[init] || { online: false };
         const isOnline = isMe ? true : presence.online;
-        const status = isMe
-          ? (userState?.kickedFromRoom ? "kicked" : submittedToday ? "active" : userState?.missedDays >= 1 ? "at_risk" : "active")
-          : "active";
-        const dot = status === "kicked" ? "#ef4444" : status === "at_risk" ? "#f97316" : isOnline ? "#22c55e" : "#6b7280";
-        const label = status === "kicked" ? "kicked" : status === "at_risk" ? "at risk" : isMe ? (submittedToday ? "submitted" : "not yet") : isOnline ? "online" : "offline";
+        
+        // Determine member status
+        let status = "active";
+        if (isMe) {
+          if (userState?.kickedFromRoom) {
+            status = "kicked";
+          } else if (userState?.kickStatus === "inactive") {
+            status = "inactive";
+          } else if (!submittedToday && userState?.missedDays >= 2) {
+            status = "at_risk";
+          } else if (!submittedToday) {
+            status = "flagged";
+          }
+        }
+        
+        const dot = status === "kicked" ? "#ef4444" : 
+                   status === "inactive" ? "#6b7280" : 
+                   status === "at_risk" ? "#f97316" : 
+                   isOnline ? "#22c55e" : "#6b7280";
 
         // Look up full profile — for self use me directly, for others scan allUsers
         const profile = isMe ? null : lookupMember(init);
@@ -3813,7 +3902,7 @@ function RoomMemberStatusList({ members, userState, submittedToday, me, allUsers
         return (
           <div key={init} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", background: T.surfaceAlt, borderRadius: 8 }}>
             {/* Online indicator dot */}
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flexShrink: 0, boxShadow: isOnline && status !== "kicked" ? `0 0 5px ${dot}` : "none" }} />
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flexShrink: 0, boxShadow: isOnline && status !== "kicked" && status !== "removed" && status !== "inactive" ? `0 0 5px ${dot}` : "none" }} />
             <Avatar name={displayName} photo={photo} size={26} color={SHARED.yellow} username={username} />
             {/* Name + username */}
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -3824,7 +3913,7 @@ function RoomMemberStatusList({ members, userState, submittedToday, me, allUsers
                 @{username}
               </div>
             </div>
-            <span style={{ fontSize: 11, color: T.textFaint, flexShrink: 0 }}>{label}</span>
+            <MemberStatusBadge status={status} />
             {/* Report button — only visible for other members, not self */}
             {!isMe && (
               <button
@@ -8881,7 +8970,7 @@ function Toggle({ on, onToggle }) {
   );
 }
 
-function SettingsModal({ open, onClose, theme, setTheme, notifPrefs, setNotifPrefs, onLogout, premium, onTogglePremium, onDeleteAccount }) {
+function SettingsModal({ open, onClose, theme, setTheme, notifPrefs, setNotifPrefs, onLogout, premium, onTogglePremium, onDeleteAccount, onOpenLegal }) {
   const { T } = useTheme();
   const NOTIF_KEYS = ["Proof submission reminders", "Kick warnings", "New room members"];
   const notifs    = notifPrefs;
@@ -8936,6 +9025,40 @@ function SettingsModal({ open, onClose, theme, setTheme, notifPrefs, setNotifPre
           <div style={{ fontSize: 11, color: T.textFaint, marginTop: 1 }}>XP, streaks, badges, kicks</div>
         </div>
         <Toggle on={soundOn} onToggle={toggleSound} />
+      </div>
+      <div style={{ fontWeight: 500, fontSize: 14, color: T.text, marginBottom: 10, marginTop: 22 }}>Legal & Safety</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 22 }}>
+        {[
+          { id: "terms", label: "Terms of Service" },
+          { id: "privacy", label: "Privacy Policy" },
+          { id: "community", label: "Community Guidelines" },
+          { id: "safety", label: "Safety Center" },
+          { id: "tracking", label: "Cookie & Tracking" },
+          { id: "about", label: "About Capitol" },
+          { id: "contact", label: "Contact & Support" },
+          { id: "data", label: "Account & Data" },
+        ].map(item => (
+          <button
+            key={item.id}
+            onClick={() => { onClose(); onOpenLegal(item.id); }}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: `1px solid ${T.border}`,
+              background: "transparent",
+              color: T.text,
+              fontSize: 12,
+              cursor: "pointer",
+              textAlign: "left",
+              fontFamily: "inherit",
+              transition: "all 0.15s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = T.surfaceAlt; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+          >
+            {item.label}
+          </button>
+        ))}
       </div>
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Btn variant="danger" onClick={() => { onClose(); onLogout?.(); }}
@@ -9429,29 +9552,23 @@ function AuthSplitLayout({ children, step = 0, totalSteps = 0, onBack }) {
         .cap-auth-progress{display:flex;gap:6px;margin-bottom:24px;}
         .cap-auth-progress span{flex:1;height:4px;border-radius:99px;background:${C.border};transition:background .2s;}
         .cap-auth-progress span.on{background:${C.yellow};}
+        .cap-auth-image{width:100%;height:100%;object-fit:cover;object-position:center;}
         @media (max-width:820px){
           .cap-auth-split{flex-direction:column;}
-          .cap-auth-left{display:none;}
-          .cap-auth-right{padding:28px 20px;min-height:100vh;}
+          .cap-auth-left{height:200px;padding:24px;justify-content:center;}
+          .cap-auth-image{height:100%;object-fit:cover;object-position:center top;}
+          .cap-auth-right{padding:28px 20px;min-height:calc(100vh - 200px);}
         }
       `}</style>
       <div className="cap-auth-split">
         <div className="cap-auth-left">
           <div style={{ position:"absolute", inset:0, backgroundImage:"radial-gradient(circle at 70% 80%, #F5C8000d 0%, transparent 40%)", pointerEvents:"none" }} />
-          <div style={{ position:"relative", textAlign:"center", maxWidth:360 }}>
-            <div style={{ width:72, height:72, borderRadius:20, background:"#F5C80018", border:"1.5px solid #F5C80044", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 22px" }}>
-              <KDBolt size={36} animate={false} color="#F5C800" />
-            </div>
-            <div style={{ fontWeight:900, fontSize:36, letterSpacing:-1.2, marginBottom:10 }}>Capitol</div>
-            <div style={{ fontSize:15, color:C.muted, lineHeight:1.55 }}>
-              Accountability rooms for people who show up. Build streaks, earn XP, and grow with peers who won't let you quit.
-            </div>
-            <div style={{ marginTop:36, display:"flex", justifyContent:"center", gap:18, opacity:0.85 }}>
-              <div style={{ width:48, height:48, borderRadius:14, background:C.surface, border:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"center" }}><KDFlame size={22} animate={false} /></div>
-              <div style={{ width:48, height:48, borderRadius:14, background:C.surface, border:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"center" }}><KDTrophy size={22} gold animate={false} /></div>
-              <div style={{ width:48, height:48, borderRadius:14, background:C.surface, border:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"center" }}><KDCheck size={22} animate={false} /></div>
-            </div>
-          </div>
+          <img 
+            src="/capitol-split-screen.png" 
+            alt="Capitol" 
+            className="cap-auth-image"
+            style={{ position:"relative", width:"100%", height:"100%", objectFit:"cover", objectPosition:"center" }}
+          />
         </div>
         <div className="cap-auth-right">
           <div className="cap-auth-card">
@@ -15116,7 +15233,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} notifPrefs={notifPrefs} setNotifPrefs={setNotifPrefs} onLogout={onLogout} premium={premium} onTogglePremium={() => { setPremium(p => !p); showToast(premium ? "Premium deactivated" : " Premium activated!", "success"); }} onDeleteAccount={async () => { const r = await fbDeleteAccount(); if (r.ok) { setSettingsOpen(false); showToast("Account deleted. You'll be logged out.", "success"); setTimeout(() => onLogout?.(), 1500); } else { showToast("Failed to delete account: " + r.error, "error"); } }} />
       <OnboardingModal room={onboardRoom} open={!!onboardRoom} onClose={() => setOnboardRoom(null)} onComplete={handleOnboardComplete} />
       <MemberProfileModal member={viewedMember} open={!!viewedMember} onClose={() => setViewedMember(null)} reporterUid={uid} onFollow={handleFollow} uid={uid} following={following} allUsers={allUsers} showToast={showToast} me={me} />
-      <AutoMatchModal open={autoMatchOpen} onClose={() => setAutoMatchOpen(false)} rooms={rooms} onMatched={handleAutoMatched} />
+      <AutoMatchModal open={autoMatchOpen} onClose={() => setAutoMatchOpen(false)} rooms={rooms} onMatched={handleAutoMatched} profile={profile} />
       <EnterWithCodeModal open={enterCodeOpen} onClose={() => setEnterCodeOpen(false)} onJoin={handleJoin} rooms={rooms} me={me} />
       <SendChallengeModal open={challengeOpen} onClose={() => setChallengeOpen(false)} fromUid={uid} allUsers={allUsers} showToast={showToast} />
       <ShareStreakModal open={shareStreakOpen} onClose={() => setShareStreakOpen(false)} me={me} joinedRoom={joinedRoom} cardType={shareCardType} />

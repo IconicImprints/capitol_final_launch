@@ -22,6 +22,14 @@ const EMPTY = {
   closeFriendRequests: {},
   referrals: {},
   freezeTokens: {},
+  waitingQueue: {},
+  replacementQueue: {},
+  config: {
+    inactivityThresholdDays: 3,
+    minRoomSize: 3,
+    maxRoomSize: 8,
+    lastActivityCheck: null,
+  },
 };
 
 function ensure() {
@@ -44,6 +52,9 @@ export function saveDb(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
+// Synchronous withDb for compatibility with existing code
+// This provides basic serialization but is NOT truly atomic for concurrent requests
+// For production, consider a proper database with transaction support
 export function withDb(mutator) {
   const db = loadDb();
   const result = mutator(db);

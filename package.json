@@ -1,0 +1,11 @@
+{
+  "name": "capitol-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "cd files && npm run dev",
+    "build": "cd files && npm run build",
+    "start": "cd files && npm start",
+    "preview": "cd files && npm run preview"
+  }
+}

@@ -1,4 +1,33 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
+import { supabase, isSupabaseConfigured } from "./lib/supabase.js";
+import { identifyUser, resetAnalytics, trackEvent } from "./lib/posthog.js";
+
+// Keep Express as the app source of truth; mirror credentials into Supabase Auth when configured.
+async function _supabaseSignUp(email, password, meta = {}) {
+  if (!isSupabaseConfigured || !supabase || !email || !password) return;
+  try {
+    await supabase.auth.signUp({
+      email: String(email).trim(),
+      password: String(password),
+      options: { data: meta },
+    });
+  } catch {}
+}
+
+async function _supabaseSignIn(email, password) {
+  if (!isSupabaseConfigured || !supabase || !email || !password) return;
+  try {
+    await supabase.auth.signInWithPassword({
+      email: String(email).trim(),
+      password: String(password),
+    });
+  } catch {}
+}
+
+async function _supabaseSignOut() {
+  if (!isSupabaseConfigured || !supabase) return;
+  try { await supabase.auth.signOut(); } catch {}
+}
 
 // ── API Base ─────────────────────────────────────────────────────────────
 const _API = (() => {
@@ -6,22 +35,16 @@ const _API = (() => {
   if (envUrl) return envUrl;
   const host = window.location.hostname;
   const p = window.location.port;
-  // Local Vite → talk to API directly; Codespaces / prod → same-origin (Vite proxy or reverse proxy)
-  if ((host === "localhost" || host === "127.0.0.1") && (p === "3000" || p === "5173")) {
+  // Local Vite dev → talk to API directly; preview/prod → same-origin (Vite proxy or reverse proxy)
+  if ((host === "localhost" || host === "127.0.0.1") && p === "5173") {
     return "http://localhost:3001";
   }
-  return ""; // same-origin
+  return ""; // same-origin - use Vite proxy in preview mode
 })();
 
 function _apiOrigin() {
   if (_API) return _API;
-  const { protocol, hostname, port } = window.location;
-  // Vite preview/dev runs separately from the API in this project. Use the
-  // same forwarded host with the API port so uploaded files resolve outside
-  // localhost as well as in a local browser.
-  if (port === "4173" || port === "5173" || port === "3000") {
-    return `${protocol}//${hostname}:3001`;
-  }
+  // In preview mode with proxy, use same-origin
   return window.location.origin;
 }
 
@@ -151,7 +174,11 @@ async function fbSignup({ displayName, userId, email, password, joinedDate }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || userId);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    return { ok: true, user: _mapUser(res.user) };
+    await _supabaseSignIn(email, password);
+    const mapped = _mapUser(res.user);
+    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
+    trackEvent("signup_success");
+    return { ok: true, user: mapped };
   } catch (e) {
     const users = _getUsersStore();
     if (Object.values(users).some(u => (u.username || "").toLowerCase() === String(userId).toLowerCase())) {
@@ -189,7 +216,12 @@ async function fbSignup({ displayName, userId, email, password, joinedDate }) {
     localStorage.setItem("kd_token", token);
     localStorage.setItem("kd_current_uid", id);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(newUser)));
-    return { ok: true, user: _mapUser(newUser) };
+    await _supabaseSignUp(email, password, { username: userId, display_name: displayName });
+    await _supabaseSignIn(email, password);
+    const mapped = _mapUser(newUser);
+    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
+    trackEvent("signup_success");
+    return { ok: true, user: mapped };
   }
 }
 
@@ -199,7 +231,11 @@ async function fbLogin({ email, password }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || res.user?.username || "");
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    return { ok: true, user: _mapUser(res.user) };
+    await _supabaseSignIn(email, password);
+    const mapped = _mapUser(res.user);
+    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
+    trackEvent("login_success");
+    return { ok: true, user: mapped };
   } catch (e) {
     const users = _getUsersStore();
     const user = Object.values(users).find(u => (u.email || "").toLowerCase() === String(email).toLowerCase() && u.password === password);
@@ -208,7 +244,11 @@ async function fbLogin({ email, password }) {
     localStorage.setItem("kd_token", token);
     localStorage.setItem("kd_current_uid", user.id || user.username);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(user)));
-    return { ok: true, user: _mapUser(user) };
+    await _supabaseSignIn(email, password);
+    const mapped = _mapUser(user);
+    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
+    trackEvent("login_success");
+    return { ok: true, user: mapped };
   }
 }
 
@@ -217,6 +257,9 @@ async function fbLogout() {
     localStorage.removeItem("kd_token");
     localStorage.removeItem("kd_current_uid");
     localStorage.removeItem("kd_session");
+    await _supabaseSignOut();
+    resetAnalytics();
+    trackEvent("logout");
   } catch {}
 }
 
@@ -481,6 +524,34 @@ async function fbKickUser(uid, roomId, targetId, xpPenalty, kickEntry, moderator
     await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/kick", { targetId, reason: kickEntry?.reason || "" });
     return { ok: true };
   } catch { return { ok: false }; }
+}
+
+// ── Waiting Queue ─────────────────────────────────────────────────────────────
+async function fbJoinWaitingQueue({ niche, ageRange }) {
+  try {
+    const res = await _apiPost("/api/waiting-queue/join", { niche, ageRange });
+    return res;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function fbLeaveWaitingQueue() {
+  try {
+    await _apiDel("/api/waiting-queue/leave");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function fbGetWaitingQueueStatus() {
+  try {
+    const res = await _apiGet("/api/waiting-queue/status");
+    return res;
+  } catch (e) {
+    return { inQueue: false, entry: null, queueSize: 0 };
+  }
 }
 
 function fbGetJoinCooldown(uid) {
@@ -1053,6 +1124,7 @@ export {
   fbGetJoinCooldown, fbAwardXP,
   fbSubscribeUser,
   fbListFreezeTokens, fbBuyFreezeToken, fbUseFreezeToken,
+  fbJoinWaitingQueue, fbLeaveWaitingQueue, fbGetWaitingQueueStatus,
   uploadFile,
   lsGet, lsSet,
   KDSound, playWave,

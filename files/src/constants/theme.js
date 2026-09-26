@@ -71,4 +71,5 @@ export const KD_ANIM_CSS = `
 @keyframes kd-premium-verify-ring{0%{transform:scale(1);box-shadow:0 0 0 0 rgba(34,197,94,0.6)}50%{transform:scale(1.12);box-shadow:0 0 0 12px rgba(34,197,94,0)}100%{transform:scale(1);box-shadow:0 0 0 0 rgba(34,197,94,0)}}
 @keyframes kd-premium-spotlight{0%{opacity:0;transform:scale(0.8)}30%{opacity:1;transform:scale(1)}100%{opacity:1;transform:scale(1)}}
 @keyframes kd-premium-rare-glow{0%,100%{filter:drop-shadow(0 0 6px var(--glow))}50%{filter:drop-shadow(0 0 18px var(--glow))}}
+@keyframes kd-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.8;transform:scale(1.05)}}
 `;

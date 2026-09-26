@@ -7,3 +7,8 @@ files/dist/
 *.log
 .env
 .DS_Store
+
+files/.env
+files/server/.env
+.env.*
+!.env.example

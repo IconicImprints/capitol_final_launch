@@ -10,6 +10,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { loadDb, saveDb, withDb } from "./db.js";
+import { isSupabaseConfigured, verifySupabaseAdmin, ensureSupabaseAuthUser } from "./supabase.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3001);
@@ -191,7 +192,7 @@ function calcLevel(xp) {
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
-app.post("/api/auth/signup", (req, res) => {
+app.post("/api/auth/signup", async (req, res) => {
   const { displayName, username, email, password } = req.body || {};
   if (!displayName || !username || !email || !password) {
     return res.status(400).json({ error: "Missing fields" });
@@ -275,8 +276,18 @@ app.post("/api/auth/signup", (req, res) => {
       db.users[id] = user;
       const tok = tokenFor(id);
       db.sessions[tok] = { userId: id, createdAt: now };
-      return { token: tok, user: selfUser(user) };
+      return { token: tok, user: selfUser(user), _sync: { email: user.email, password, username, displayName: user.display_name, id } };
     });
+    // Mirror into Auth before responding so client sign-in can succeed immediately.
+    const sync = result._sync;
+    delete result._sync;
+    if (sync) {
+      await ensureSupabaseAuthUser({
+        email: sync.email,
+        password: sync.password,
+        metadata: { username: sync.username, display_name: sync.displayName, capitol_id: sync.id },
+      }).catch(() => {});
+    }
     res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message || "Signup failed" });
@@ -298,6 +309,11 @@ app.post("/api/auth/login", (req, res) => {
   user.last_seen_at = new Date().toISOString();
   db.sessions[tok] = { userId: user.id, createdAt: new Date().toISOString() };
   saveDb(db);
+  ensureSupabaseAuthUser({
+    email: user.email,
+    password,
+    metadata: { username: user.username, display_name: user.display_name, capitol_id: user.id },
+  }).catch(() => {});
   res.json({ token: tok, user: selfUser(user) });
 });
 
@@ -519,6 +535,18 @@ app.post("/api/rooms/:id/leave", auth, (req, res) => {
     }
     const u = db.users[req.user.id];
     if (u) u.room_joined_at = null;
+    
+    // Queue replacement if room is below minimum size
+    const room = db.rooms[req.params.id];
+    if (room) {
+      const members = roomMembers(db, room.id);
+      const minRoomSize = db.config?.minRoomSize || 3;
+      // Only queue if room has at least 1 member (don't queue replacement for empty rooms)
+      if (members.length > 0 && members.length < minRoomSize) {
+        queueReplacement(db, room.id);
+      }
+    }
+    
     res.json({ ok: true });
   });
 });
@@ -539,6 +567,15 @@ app.post("/api/rooms/:id/kick", auth, (req, res) => {
     target.kick_status = "kicked";
     target.xp = Math.max(0, (target.xp || 0) - 20);
     target.burned_at = new Date().toISOString();
+    
+    // Queue replacement if room is below minimum size
+    const members = roomMembers(db, room.id);
+    const minRoomSize = db.config?.minRoomSize || 3;
+    // Only queue if room has at least 1 member (don't queue replacement for empty rooms)
+    if (members.length > 0 && members.length < minRoomSize) {
+      queueReplacement(db, room.id);
+    }
+    
     res.json({ ok: true });
   });
 });
@@ -895,6 +932,437 @@ app.post("/api/economy/use-freeze", auth, (req, res) => {
   });
 });
 
+// ── Auto-Kick + Auto-Replacement System ──────────────────────────────────────
+
+// Helper: Check if user has submitted proof today for a specific room
+function hasProofToday(db, userId, roomId) {
+  const today = new Date().toISOString().slice(0, 10);
+  return Object.values(db.proofs).some(
+    (p) => p.user_id === userId && 
+    (p.room_id === roomId || !p.room_id) && 
+    p.date_key === today &&
+    p.ai_verdict === "approved"
+  );
+}
+
+// Helper: Get days since last proof for a user in a room
+function daysSinceLastProof(db, userId, roomId) {
+  const roomProofs = Object.values(db.proofs).filter(
+    (p) => p.user_id === userId && 
+    (p.room_id === roomId || !p.room_id) &&
+    p.ai_verdict === "approved"
+  );
+  if (roomProofs.length === 0) return 999;
+  
+  roomProofs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const lastProof = roomProofs[0];
+  const lastDate = lastProof.date_key;
+  const today = new Date().toISOString().slice(0, 10);
+  
+  const diff = new Date(today) - new Date(lastDate);
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
+}
+
+// Helper: Find eligible replacement for a room
+function findReplacement(db, room) {
+  const threshold = db.config?.inactivityThresholdDays || 3;
+  const maxRoomSize = db.config?.maxRoomSize || 8;
+  
+  // Get current room members for comparison
+  const currentMembers = roomMembers(db, room.id);
+  const currentMemberIds = new Set(currentMembers.map(m => m.userId));
+  
+  // Find users in waiting queue who match room criteria
+  const candidates = Object.values(db.waitingQueue).filter(w => {
+    const user = db.users[w.userId];
+    if (!user) return false;
+    if (currentMemberIds.has(user.id)) return false;
+    if (user.is_banned || user.is_suspended) return false;
+    
+    // Check if user is already in an active room (unless premium)
+    const hasActiveRoom = Object.values(db.roomMembers).some(
+      m => m.userId === user.id && m.status === "active"
+    );
+    if (hasActiveRoom && !user.premium) return false;
+    
+    // Match niche/topic
+    if (room.niche && room.niche !== "general" && user.niche !== room.niche) {
+      return false;
+    }
+    
+    // Match age range
+    if (room.age_range && user.age_range && user.age_range !== room.age_range) {
+      return false;
+    }
+    
+    return true;
+  });
+  
+  if (candidates.length === 0) return null;
+  
+  // Prioritize: same topic, closest age match, longest waiting
+  candidates.sort((a, b) => {
+    const userA = db.users[a.userId];
+    const userB = db.users[b.userId];
+    
+    // Priority 1: Same topic/niche
+    const topicMatchA = room.niche && userA.niche === room.niche;
+    const topicMatchB = room.niche && userB.niche === room.niche;
+    if (topicMatchA && !topicMatchB) return -1;
+    if (!topicMatchA && topicMatchB) return 1;
+    
+    // Priority 2: Longest time waiting
+    const waitTimeA = new Date() - new Date(a.joinedAt);
+    const waitTimeB = new Date() - new Date(b.joinedAt);
+    return waitTimeB - waitTimeA;
+  });
+  
+  return candidates[0];
+}
+
+// Helper: Check and process inactive members for all rooms
+function processInactiveMembers(db) {
+  const threshold = db.config?.inactivityThresholdDays || 3;
+  const now = new Date().toISOString();
+  let kickedCount = 0;
+  
+  // Update last activity check time
+  if (!db.config) db.config = {};
+  db.config.lastActivityCheck = now;
+  
+  // Check each room
+  for (const room of Object.values(db.rooms)) {
+    const members = roomMembers(db, room.id);
+    
+    for (const member of members) {
+      const user = db.users[member.userId];
+      if (!user) continue;
+      
+      const daysSince = daysSinceLastProof(db, user.id, room.id);
+      
+      // Check if member is inactive
+      if (daysSince >= threshold) {
+        // Mark member as inactive and remove from room
+        member.status = "inactive_kicked";
+        member.inactiveSince = now;
+        member.inactiveReason = `No proof for ${daysSince} days`;
+        
+        // Update user status
+        user.kicked_from_room = true;
+        user.kick_status = "inactive";
+        user.burned_at = now;
+        user.xp = Math.max(0, (user.xp || 0) - 20);
+        
+        // Create notification for kicked user
+        const nid = rid("notif");
+        db.notifications[nid] = {
+          id: nid,
+          user_id: user.id,
+          type: "kick",
+          read: false,
+          created_at: now,
+          data: JSON.stringify({
+            reason: `Inactive for ${daysSince} days`,
+            roomId: room.id,
+            roomName: room.name,
+          }),
+        };
+        
+        kickedCount++;
+        
+        // Queue replacement for this room only if it still has members
+        const remainingMembers = roomMembers(db, room.id);
+        const minRoomSize = db.config?.minRoomSize || 3;
+        if (remainingMembers.length > 0 && remainingMembers.length < minRoomSize) {
+          queueReplacement(db, room.id);
+        }
+      }
+    }
+  }
+  
+  return kickedCount;
+}
+
+// Helper: Queue a replacement for a room
+function queueReplacement(db, roomId) {
+  const existing = Object.values(db.replacementQueue).find(r => r.roomId === roomId && r.status === "pending");
+  if (existing) return; // Already queued
+  
+  const id = rid("rep");
+  db.replacementQueue[id] = {
+    id,
+    roomId,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    attempts: 0,
+  };
+}
+
+// Helper: Process replacement queue
+function processReplacementQueue(db) {
+  const processed = [];
+  const assignedUserIds = new Set(); // Track users assigned in this batch to prevent duplicates
+  
+  for (const [id, replacement] of Object.entries(db.replacementQueue)) {
+    if (replacement.status !== "pending") continue;
+    
+    const room = db.rooms[replacement.roomId];
+    if (!room) {
+      replacement.status = "failed";
+      replacement.error = "Room not found";
+      continue;
+    }
+    
+    const currentMembers = roomMembers(db, room.id);
+    const maxRoomSize = db.config?.maxRoomSize || 8;
+    
+    // Check if room still needs replacement
+    if (currentMembers.length >= maxRoomSize) {
+      replacement.status = "completed";
+      replacement.reason = "Room full";
+      continue;
+    }
+    
+    // Find replacement candidate
+    const candidate = findReplacement(db, room);
+    if (!candidate) {
+      replacement.attempts = (replacement.attempts || 0) + 1;
+      // Retry later if under max attempts
+      if (replacement.attempts >= 10) {
+        replacement.status = "failed";
+        replacement.error = "No eligible candidates found after multiple attempts";
+      }
+      continue;
+    }
+    
+    // Check if candidate was already assigned in this batch (race condition protection)
+    if (assignedUserIds.has(candidate.userId)) {
+      replacement.attempts = (replacement.attempts || 0) + 1;
+      continue;
+    }
+    
+    // Add candidate to room (atomic operation)
+    const user = db.users[candidate.userId];
+    if (!user) {
+      replacement.status = "failed";
+      replacement.error = "Candidate user not found";
+      continue;
+    }
+    
+    // Double-check user is not already in this room
+    const alreadyInRoom = currentMembers.some(m => m.userId === user.id);
+    if (alreadyInRoom) {
+      replacement.status = "completed";
+      replacement.reason = "User already in room";
+      continue;
+    }
+    
+    // Remove from waiting queue
+    delete db.waitingQueue[candidate.id];
+    
+    // Leave any other active room first
+    for (const m of Object.values(db.roomMembers)) {
+      if (m.userId === user.id && m.status === "active") {
+        m.status = "left";
+      }
+    }
+    
+    // Re-check room capacity after potential concurrent changes
+    const updatedMembers = roomMembers(db, room.id);
+    if (updatedMembers.length >= maxRoomSize) {
+      replacement.status = "completed";
+      replacement.reason = "Room became full during processing";
+      // Put user back in waiting queue
+      const newWaitId = rid("wait");
+      db.waitingQueue[newWaitId] = {
+        id: newWaitId,
+        userId: user.id,
+        niche: candidate.niche || user.niche || "",
+        ageRange: candidate.ageRange || user.age_range || "",
+        joinedAt: new Date().toISOString(),
+      };
+      continue;
+    }
+    
+    // Add to room
+    const mid = rid("rm");
+    db.roomMembers[mid] = {
+      id: mid,
+      roomId: room.id,
+      userId: user.id,
+      status: "active",
+      joinedAt: new Date().toISOString(),
+      replacement: true,
+    };
+    
+    // Mark user as assigned to prevent duplicate assignments in this batch
+    assignedUserIds.add(user.id);
+    
+    // Update user
+    user.room_joined_at = new Date().toLocaleDateString("en-US", { 
+      month: "long", day: "numeric", year: "numeric" 
+    });
+    user.joined_rooms = (user.joined_rooms || 0) + 1;
+    
+    // Notify new member
+    const nid1 = rid("notif");
+    db.notifications[nid1] = {
+      id: nid1,
+      user_id: user.id,
+      type: "room_joined",
+      read: false,
+      created_at: new Date().toISOString(),
+      data: JSON.stringify({
+        roomId: room.id,
+        roomName: room.name,
+        message: "You've been matched into a new room!",
+      }),
+    };
+    
+    // Notify existing room members
+    for (const member of currentMembers) {
+      const nid2 = rid("notif");
+      db.notifications[nid2] = {
+        id: nid2,
+        user_id: member.userId,
+        type: "new_member",
+        read: false,
+        created_at: new Date().toISOString(),
+        data: JSON.stringify({
+          roomId: room.id,
+          roomName: room.name,
+          newMemberName: user.display_name,
+          message: `${user.display_name} joined your room`,
+        }),
+      };
+    }
+    
+    replacement.status = "completed";
+    replacement.candidateId = user.id;
+    processed.push({ roomId: room.id, userId: user.id });
+  }
+  
+  return processed;
+}
+
+// API: Add user to waiting queue
+app.post("/api/waiting-queue/join", auth, (req, res) => {
+  const { niche, ageRange } = req.body || {};
+  withDb((db) => {
+    // Remove any existing waiting entry
+    for (const [id, w] of Object.entries(db.waitingQueue)) {
+      if (w.userId === req.user.id) {
+        delete db.waitingQueue[id];
+      }
+    }
+    
+    const id = rid("wait");
+    db.waitingQueue[id] = {
+      id,
+      userId: req.user.id,
+      niche: niche || req.user.niche || "",
+      ageRange: ageRange || req.user.age_range || "",
+      joinedAt: new Date().toISOString(),
+    };
+    
+    // Try to find immediate match
+    for (const room of Object.values(db.rooms)) {
+      const members = roomMembers(db, room.id);
+      const maxRoomSize = db.config?.maxRoomSize || 8;
+      
+      if (members.length < maxRoomSize) {
+        const candidate = findReplacement(db, room);
+        if (candidate && candidate.userId === req.user.id) {
+          // Immediate match found
+          queueReplacement(db, room.id);
+          const result = processReplacementQueue(db);
+          if (result.length > 0) {
+            return res.json({ 
+              ok: true, 
+              queued: false, 
+              matched: true, 
+              roomId: room.id 
+            });
+          }
+        }
+      }
+    }
+    
+    res.json({ ok: true, queued: true, waitingId: id });
+  });
+});
+
+// API: Remove user from waiting queue
+app.delete("/api/waiting-queue/leave", auth, (req, res) => {
+  withDb((db) => {
+    for (const [id, w] of Object.entries(db.waitingQueue)) {
+      if (w.userId === req.user.id) {
+        delete db.waitingQueue[id];
+      }
+    }
+    res.json({ ok: true });
+  });
+});
+
+// API: Get waiting queue status
+app.get("/api/waiting-queue/status", auth, (req, res) => {
+  const db = loadDb();
+  const entry = Object.values(db.waitingQueue).find(w => w.userId === req.user.id);
+  res.json({ 
+    inQueue: !!entry, 
+    entry: entry || null,
+    queueSize: Object.keys(db.waitingQueue).length 
+  });
+});
+
+// API: Manual trigger for activity check (admin only)
+app.post("/api/admin/check-activity", auth, (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
+  
+  const result = withDb((db) => {
+    const kickedCount = processInactiveMembers(db);
+    const replacements = processReplacementQueue(db);
+    return { kickedCount, replacementsProcessed: replacements.length };
+  });
+  
+  res.json(result);
+});
+
+// API: Get system config (admin only)
+app.get("/api/admin/config", auth, (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
+  
+  const db = loadDb();
+  res.json({ config: db.config || {} });
+});
+
+// API: Update system config (admin only)
+app.patch("/api/admin/config", auth, (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
+  
+  const { inactivityThresholdDays, minRoomSize, maxRoomSize } = req.body || {};
+  
+  withDb((db) => {
+    if (!db.config) db.config = {};
+    if (inactivityThresholdDays !== undefined) db.config.inactivityThresholdDays = inactivityThresholdDays;
+    if (minRoomSize !== undefined) db.config.minRoomSize = minRoomSize;
+    if (maxRoomSize !== undefined) db.config.maxRoomSize = maxRoomSize;
+    res.json({ config: db.config });
+  });
+});
+
+// Schedule periodic activity check (every hour)
+setInterval(() => {
+  try {
+    withDb((db) => {
+      processInactiveMembers(db);
+      processReplacementQueue(db);
+    });
+  } catch (error) {
+    console.error("Activity check error:", error);
+  }
+}, 60 * 60 * 1000); // 1 hour
+
 // ── Images ───────────────────────────────────────────────────────────────────
 app.post("/api/images/upload", auth, upload.single("image"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file" });
@@ -902,8 +1370,23 @@ app.post("/api/images/upload", auth, upload.single("image"), (req, res) => {
   res.json({ url });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.get("/api/health", async (_req, res) => {
+  const supabase = isSupabaseConfigured
+    ? await verifySupabaseAdmin().catch(() => ({ ok: false, reason: "verify_failed" }))
+    : { ok: false, reason: "not_configured" };
+  res.json({
+    ok: true,
+    supabase: { configured: isSupabaseConfigured, connected: !!supabase.ok },
+  });
+});
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Capitol API listening on http://localhost:${PORT}`);
+  console.log(`Capitol API listening on http://0.0.0.0:${PORT}`);
+  if (isSupabaseConfigured) {
+    verifySupabaseAdmin()
+      .then((r) => console.log(`Supabase: ${r.ok ? "connected" : "unavailable"}`))
+      .catch(() => console.log("Supabase: unavailable"));
+  } else {
+    console.log("Supabase: not configured");
+  }
 });
