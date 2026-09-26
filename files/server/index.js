@@ -14,7 +14,9 @@ import { isSupabaseConfigured, verifySupabaseAdmin, ensureSupabaseAuthUser } fro
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3001);
-const UPLOAD_DIR = path.join(__dirname, "uploads");
+const UPLOAD_DIR = process.env.VERCEL
+  ? path.join("/tmp", "capitol-uploads")
+  : path.join(__dirname, "uploads");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const app = express();
@@ -1380,13 +1382,22 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Capitol API listening on http://0.0.0.0:${PORT}`);
-  if (isSupabaseConfigured) {
-    verifySupabaseAdmin()
-      .then((r) => console.log(`Supabase: ${r.ok ? "connected" : "unavailable"}`))
-      .catch(() => console.log("Supabase: unavailable"));
-  } else {
-    console.log("Supabase: not configured");
-  }
-});
+export default app;
+
+function startLocal() {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Capitol API listening on http://0.0.0.0:${PORT}`);
+    if (isSupabaseConfigured) {
+      verifySupabaseAdmin()
+        .then((r) => console.log(`Supabase: ${r.ok ? "connected" : "unavailable"}`))
+        .catch(() => console.log("Supabase: unavailable"));
+    } else {
+      console.log("Supabase: not configured");
+    }
+  });
+}
+
+// On Vercel the platform invokes the exported app; locally we listen.
+if (!process.env.VERCEL) {
+  startLocal();
+}

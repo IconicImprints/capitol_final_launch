@@ -1,12 +1,13 @@
-const CACHE = "capitol-v2";
+const CACHE = "capitol-v3";
 
 const PRECACHE_URLS = [
   "/",
   "/index.html",
-  "/src/main.jsx",
   "/manifest.json",
-  "/icons/icon-192.svg",
-  "/icons/icon-512.svg",
+  "/capitol-logo.jpg",
+  "/favicon.jpg",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
 ];
 
 self.addEventListener("install", event => {

@@ -16,7 +16,12 @@
     "@supabase/supabase-js": "^2.117.2",
     "posthog-js": "^1.434.14",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.4",
+    "express": "^4.21.0",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^10.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
