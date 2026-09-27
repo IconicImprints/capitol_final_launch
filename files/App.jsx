@@ -10043,15 +10043,17 @@ function LandingPage({ onEnter }) {
           {authError && (
             <div style={{ fontSize:12, color:C.red, background:"#ef444415", border:"1px solid #ef444430", borderRadius:8, padding:"8px 12px" }}>{authError}</div>
           )}
-          <button onClick={isLogin ? handleLogin : null} disabled={!isLogin || authLoading}
-            style={{ width:"100%", background: authLoading ? C.faint : C.black, color:"#ffffff", border:"none", borderRadius:12, padding:"14px 0", fontWeight:800, fontSize:15, fontFamily:FONT, cursor: !isLogin || authLoading ? "not-allowed" : "pointer", marginTop:4, opacity: authLoading ? 0.7 : 1, transition:"all 0.15s", userSelect:"none" }}>
-            {authLoading ? "Signing in…" : "Sign in"}
+          <button onClick={isLogin ? handleLogin : handleSignup} disabled={authLoading}
+            style={{ width:"100%", background: authLoading ? C.faint : C.black, color:"#ffffff", border:"none", borderRadius:12, padding:"14px 0", fontWeight:800, fontSize:15, fontFamily:FONT, cursor: authLoading ? "not-allowed" : "pointer", marginTop:4, opacity: authLoading ? 0.7 : 1, transition:"all 0.15s", userSelect:"none" }}>
+            {authLoading ? (isLogin ? "Signing in…" : "Creating account…") : (isLogin ? "Sign in" : "Create account")}
           </button>
         </div>
 
-        <div style={{ marginTop:20, fontSize:13, color:C.muted }}>
-          Account creation is currently disabled. Contact administrator for access.
-        </div>
+        {!isLogin && (
+          <div style={{ marginTop:20, fontSize:13, color:C.muted }}>
+            By creating an account, you agree to our terms and community guidelines.
+          </div>
+        )}
       </AuthSplitLayout>
     );
   }

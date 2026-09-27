@@ -26,7 +26,9 @@ function _j(h) { return h || _h(); }
 
 function _normalizeImageUrl(value) {
   if (!value || typeof value !== "string") return value || null;
-  if (value.startsWith("blob:") || value.startsWith("data:")) return null;
+  // Accept data URLs for serverless deployment
+  if (value.startsWith("blob:")) return null;
+  if (value.startsWith("data:")) return value; // Accept data URLs
   try {
     const parsed = new URL(value, window.location.origin);
     return parsed.pathname.startsWith("/uploads/") ? parsed.pathname : value;
@@ -64,8 +66,14 @@ async function uploadFile(file) {
   if (!res.ok || !data.url) throw new Error(data.error || "Image upload failed.");
   console.info("[Capitol upload] upload result", data);
   const imageUrl = String(data.url);
-  if (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:")) {
+  // For serverless deployment, we accept data URLs as they work without persistent storage
+  // For local development with filesystem, we still convert to relative paths
+  if (imageUrl.startsWith("blob:")) {
     throw new Error("The server returned a temporary image URL.");
+  }
+  // Accept data URLs for serverless, convert filesystem paths to relative
+  if (imageUrl.startsWith("data:")) {
+    return imageUrl; // Return data URL as-is for serverless
   }
   // Keep storage paths relative so they use the same origin as the app. The
   // Vite dev/preview proxy and the production reverse proxy both forward

@@ -6,12 +6,19 @@ import path from 'path';
 
 class StorageProvider {
   constructor() {
+    // Default to local (data URL) for serverless environments
     this.provider = process.env.STORAGE_PROVIDER || 'local';
     this.bucket = process.env.S3_BUCKET || 'capitol-uploads';
     this.region = process.env.S3_REGION || 'us-east-1';
     this.accessKeyId = process.env.S3_ACCESS_KEY_ID;
     this.secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
     this.endpoint = process.env.S3_ENDPOINT;
+    
+    // Force local storage if S3 credentials are not properly configured
+    if (this.provider === 's3' && (!this.accessKeyId || !this.secretAccessKey || this.accessKeyId === 'placeholder')) {
+      console.warn('S3 credentials not properly configured, using local storage');
+      this.provider = 'local';
+    }
   }
 
   async uploadFile(file, key) {
@@ -27,8 +34,9 @@ class StorageProvider {
     // For now, we'll implement a simple version that can be extended
     // This is a placeholder - actual S3 implementation would require aws-sdk package
     
-    if (!this.accessKeyId || !this.secretAccessKey) {
-      throw new Error('S3 credentials not configured');
+    if (!this.accessKeyId || !this.secretAccessKey || this.accessKeyId === 'placeholder') {
+      console.warn('S3 credentials not configured, falling back to data URL');
+      return this.uploadToLocal(file, key);
     }
 
     // Placeholder: In production, use AWS SDK
@@ -37,27 +45,22 @@ class StorageProvider {
     // await s3.putObject({ Bucket: this.bucket, Key: key, Body: file }).promise();
     
     // For now, fall back to local
-    console.warn('S3 upload not fully implemented, falling back to local');
+    console.warn('S3 upload not fully implemented, falling back to data URL');
     return this.uploadToLocal(file, key);
   }
 
   async uploadToLocal(file, key) {
-    const fs = await import('fs');
-    const path = await import('path');
+    // In Vercel serverless functions, we can't use persistent filesystem
+    // Instead, we'll convert to base64 and return a data URL
+    // For production, this should be replaced with proper cloud storage (S3, Cloudinary, etc.)
     
-    const uploadDir = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
-    
-    // Ensure upload directory exists
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    
-    const filePath = path.join(uploadDir, key);
     const buffer = Buffer.from(await file.arrayBuffer());
+    const base64 = buffer.toString('base64');
+    const mimeType = file.mimetype || 'image/jpeg';
     
-    fs.writeFileSync(filePath, buffer);
-    
-    return `/uploads/${key}`;
+    // Return a data URL - this works for small images but has limitations
+    // For production, implement proper cloud storage
+    return `data:${mimeType};base64,${base64}`;
   }
 
   async deleteFile(key) {
@@ -74,15 +77,9 @@ class StorageProvider {
   }
 
   async deleteFromLocal(key) {
-    const fs = await import('fs');
-    const path = await import('path');
-    
-    const uploadDir = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
-    const filePath = path.join(uploadDir, key);
-    
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
+    // Data URLs don't need deletion - they're stored in the database
+    // For filesystem-based storage, this would delete the file
+    console.log('Delete operation for data URL not needed');
   }
 
   generateKey(filename) {
@@ -96,7 +93,9 @@ class StorageProvider {
       // Return S3 public URL
       return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
     } else {
-      return `/uploads/${key}`;
+      // For local storage with data URLs, we return the key as-is since it's already a full URL
+      // For filesystem paths, this would return the path
+      return key.startsWith('data:') ? key : `/uploads/${key}`;
     }
   }
 }
