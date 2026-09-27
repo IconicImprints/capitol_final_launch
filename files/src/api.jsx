@@ -1,33 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
-import { supabase, isSupabaseConfigured } from "./lib/supabase.js";
 import { identifyUser, resetAnalytics, trackEvent } from "./lib/posthog.js";
-
-// Keep Express as the app source of truth; mirror credentials into Supabase Auth when configured.
-async function _supabaseSignUp(email, password, meta = {}) {
-  if (!isSupabaseConfigured || !supabase || !email || !password) return;
-  try {
-    await supabase.auth.signUp({
-      email: String(email).trim(),
-      password: String(password),
-      options: { data: meta },
-    });
-  } catch {}
-}
-
-async function _supabaseSignIn(email, password) {
-  if (!isSupabaseConfigured || !supabase || !email || !password) return;
-  try {
-    await supabase.auth.signInWithPassword({
-      email: String(email).trim(),
-      password: String(password),
-    });
-  } catch {}
-}
-
-async function _supabaseSignOut() {
-  if (!isSupabaseConfigured || !supabase) return;
-  try { await supabase.auth.signOut(); } catch {}
-}
 
 // ── API Base ─────────────────────────────────────────────────────────────
 const _API = (() => {
@@ -160,6 +132,7 @@ function _mapUser(u) {
     burnedAt: u.burned_at || u.burnedAt || null,
     following: u.following || [],
     premium: !!u.premium,
+    xpAwardedKeys: u.xp_awarded_keys || {},
   };
 }
 
@@ -494,6 +467,15 @@ async function fbJoinRoom(uid, roomId, init) {
   }
 }
 
+async function fbGetRoomById(roomId) {
+  try {
+    const res = await _apiGet("/api/rooms/" + encodeURIComponent(roomId));
+    return res;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 async function fbLeaveRoom(uid, roomId, init) {
   try {
     await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/leave");
@@ -609,6 +591,8 @@ async function fbSubmitProof(data) {
     });
     return { ok: true, proof: res.proof, stats: res.stats };
   } catch (e) {
+    // Fallback to localStorage only if API is completely unavailable
+    // This ensures XP is always tracked, but backend is the source of truth
     try {
       const uid = localStorage.getItem("kd_current_uid") || "";
       const users = _getUsersStore();
@@ -1111,7 +1095,7 @@ export {
   _getUsersStore, _saveUsersStore,
   fbSignup, fbLogin, fbLogout, fbDeleteAccount, fbCheckUserId,
   fbGetUser, fbGetAllUsers, fbUpdateUser,
-  fbGetRooms, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,
+  fbGetRooms, fbGetRoomById, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbGetProofs, fbSubmitProof,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
   fbGetLeaderboard,

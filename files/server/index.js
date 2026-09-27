@@ -1,75 +1,83 @@
 /**
- * Capitol multi-user API — matches the client's existing /api/* contract.
- * JSON-file persistence so every registered account shares one database.
+ * Capitol Production API
+ * PostgreSQL-based backend for scalability
  */
-import express from "express";
-import cors from "cors";
-import multer from "multer";
-import crypto from "crypto";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-import { loadDb, saveDb, withDb } from "./db.js";
-import { isSupabaseConfigured, verifySupabaseAdmin, ensureSupabaseAuthUser } from "./supabase.js";
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { query, transaction, runMigrations, healthCheck, shutdown } from './database.js';
+import {
+  hashPassword,
+  verifyPassword,
+  createSession,
+  destroySession,
+  destroyAllUserSessions,
+  startCleanupInterval
+} from './auth.js';
+import { storage } from './storage.js';
+import {
+  securityHeaders,
+  rateLimiter,
+  authRateLimiter,
+  proofRateLimiter,
+  authenticate,
+  optionalAuth,
+  requireAdmin,
+  requestLogger
+} from './middleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const PORT = Number(process.env.PORT || 3001);
-const UPLOAD_DIR = process.env.VERCEL
-  ? path.join("/tmp", "capitol-uploads")
-  : path.join(__dirname, "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "12mb" }));
-app.use("/uploads", express.static(UPLOAD_DIR));
 
+// Trust proxy for rate limiting - only trust specific proxies in production
+if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1); // Trust first proxy (Vercel)
+}
+
+// Middleware
+app.use(securityHeaders);
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '12mb' }));
+app.use(requestLogger);
+app.use(rateLimiter);
+
+// File upload configuration
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (_req, file, cb) => {
-      const ext = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp" }[file.mimetype];
-      cb(null, `${crypto.randomBytes(16).toString("hex")}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+    const allowed = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
     cb(null, allowed.has(file.mimetype));
   },
 });
 
+// Utility functions
 function uid() {
-  return "u_" + crypto.randomBytes(8).toString("hex");
+  return 'u_' + crypto.randomBytes(8).toString('hex');
 }
-function rid(prefix = "id") {
-  return prefix + "_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
-}
-function hashPass(password, salt = crypto.randomBytes(8).toString("hex")) {
-  const hash = crypto.createHash("sha256").update(salt + ":" + password).digest("hex");
-  return { salt, hash };
-}
-function checkPass(password, salt, hash) {
-  return hashPass(password, salt).hash === hash;
-}
-function tokenFor(userId) {
-  return "tok_" + crypto.createHash("sha256").update(userId + ":" + crypto.randomBytes(16).toString("hex")).digest("hex").slice(0, 40);
+
+function rid(prefix = 'id') {
+  return prefix + '_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
 }
 
 function publicUser(u) {
   if (!u) return null;
-  const { passwordHash, passwordSalt, password, email, ...safe } = u;
   return {
     id: u.id,
     username: u.username,
     display_name: u.display_name,
-    email: undefined, // never expose email in public list
+    email: undefined,
     photo_url: u.photo_url || null,
     avatar_config: u.avatar_config || null,
-    banner_url: u.banner_url || "",
-    bio: u.bio || "",
-    pronouns: u.pronouns || "",
-    timezone: u.timezone || "UTC",
+    banner_url: u.banner_url || '',
+    bio: u.bio || '',
+    pronouns: u.pronouns || '',
+    timezone: u.timezone || 'UTC',
     social_links: u.social_links || {},
     is_admin: !!u.is_admin,
     is_banned: !!u.is_banned,
@@ -84,7 +92,7 @@ function publicUser(u) {
     best_streak: u.best_streak ?? 0,
     missed_days: u.missed_days ?? 0,
     warned: !!u.warned,
-    kick_status: u.kick_status || "ok",
+    kick_status: u.kick_status || 'ok',
     kicked_from_room: !!u.kicked_from_room,
     proofs_count: u.proofs_count ?? 0,
     completed_rooms: u.completed_rooms ?? 0,
@@ -92,98 +100,33 @@ function publicUser(u) {
     join_timestamp: u.join_timestamp || null,
     consistency_score: u.consistency_score ?? 0,
     near_miss_count: u.near_miss_count ?? 0,
-    league: u.league || "bronze",
+    league: u.league || 'bronze',
     grace_active: !!u.grace_active,
     grace_start_date: u.grace_start_date || null,
     grace_days_total: u.grace_days_total ?? 0,
     total_grace_used: u.total_grace_used ?? 0,
     last_submit_date: u.last_submit_date || null,
     vulture_claimed: u.vulture_claimed || null,
-    onboarding_complete: u.onboarding_complete ? 1 : 0,
-    onboarding_questions_complete: u.onboarding_questions_complete ? 1 : 0,
-    niche: u.niche || "",
-    age_range: u.age_range || "",
+    onboarding_complete: !!u.onboarding_complete,
+    onboarding_questions_complete: !!u.onboarding_questions_complete,
+    niche: u.niche || '',
+    age_range: u.age_range || '',
     room_joined_at: u.room_joined_at || null,
-    onboard_bonus_awarded: u.onboard_bonus_awarded ? 1 : 0,
+    onboard_bonus_awarded: !!u.onboard_bonus_awarded,
     safety_accepted: u.safety_accepted ?? null,
-    invite_code: u.invite_code || "",
+    invite_code: u.invite_code || '',
     invites_count: u.invites_count ?? 0,
     burned_at: u.burned_at || null,
     following: u.following || [],
     premium: !!u.premium,
+    xp_awarded_keys: u.xp_awarded_keys || {},
   };
 }
 
-/** Self view may include email */
 function selfUser(u) {
   const p = publicUser(u);
   if (!p) return null;
-  return { ...p, email: u.email || "" };
-}
-
-function findUser(db, idOrUsername) {
-  if (!idOrUsername) return null;
-  if (db.users[idOrUsername]) return db.users[idOrUsername];
-  return Object.values(db.users).find(
-    (u) => u.username === idOrUsername || u.id === idOrUsername
-  ) || null;
-}
-
-function auth(req, res, next) {
-  const h = req.headers.authorization || "";
-  const tok = h.startsWith("Bearer ") ? h.slice(7) : "";
-  if (!tok) return res.status(401).json({ error: "Unauthorized" });
-  const db = loadDb();
-  const sess = db.sessions[tok];
-  if (!sess) return res.status(401).json({ error: "Invalid session" });
-  const user = db.users[sess.userId];
-  if (!user) return res.status(401).json({ error: "User gone" });
-  if (user.is_banned) return res.status(403).json({ error: "Banned" });
-  req.user = user;
-  req.token = tok;
-  req.db = db;
-  next();
-}
-
-function optionalAuth(req, _res, next) {
-  const h = req.headers.authorization || "";
-  const tok = h.startsWith("Bearer ") ? h.slice(7) : "";
-  if (tok) {
-    const db = loadDb();
-    const sess = db.sessions[tok];
-    if (sess && db.users[sess.userId]) {
-      req.user = db.users[sess.userId];
-      req.token = tok;
-      req.db = db;
-    }
-  }
-  next();
-}
-
-function roomMembers(db, roomId) {
-  return Object.values(db.roomMembers).filter((m) => m.roomId === roomId && m.status === "active");
-}
-
-function serializeRoom(db, r) {
-  const members = roomMembers(db, r.id);
-  const memberUsers = members.map((m) => findUser(db, m.userId)).filter(Boolean);
-  return {
-    id: r.id,
-    name: r.name,
-    icon: r.icon || "bolt",
-    goal: r.goal || "",
-    niche: r.niche || "general",
-    age_range: r.age_range || null,
-    tags: r.tags || [],
-    max_members: r.max_members || 8,
-    member_count: members.length,
-    elite: !!r.elite,
-    days: r.days || 30,
-    created_at: r.created_at,
-    creator_uid: r.creator_uid || null,
-    membersList: memberUsers.map((u) => (u.username || "?").slice(0, 2).toUpperCase()),
-    memberUids: members.map((m) => m.userId),
-  };
+  return { ...p, email: u.email || '' };
 }
 
 function calcLevel(xp) {
@@ -193,1211 +136,1197 @@ function calcLevel(xp) {
   return Math.max(1, l - 1);
 }
 
+// Centralized XP update
+async function updateUserXP(client, userId, amount, reason = 'unknown') {
+  const newXP = await client.query(
+    `UPDATE users 
+     SET xp = GREATEST(0, xp + $1),
+         level = $2,
+         xp_awarded_keys = COALESCE(xp_awarded_keys, '{}'::jsonb) || jsonb_build_object($3, $4)
+     WHERE id = $5
+     RETURNING xp, level, xp_awarded_keys`,
+    [amount, calcLevel(amount), `xp_${reason}_${new Date().toISOString().slice(0, 10)}`, true, userId]
+  );
+  
+  return newXP.rows[0];
+}
+
+// ── Health Check ─────────────────────────────────────────────────────────────
+app.get('/api/health', async (req, res) => {
+  const dbHealth = await healthCheck();
+  res.json({ ok: true, database: dbHealth });
+});
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
-app.post("/api/auth/signup", async (req, res) => {
+app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   const { displayName, username, email, password } = req.body || {};
+  
   if (!displayName || !username || !email || !password) {
-    return res.status(400).json({ error: "Missing fields" });
+    return res.status(400).json({ error: 'Missing fields' });
   }
+  
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-    return res.status(400).json({ error: "Invalid username" });
+    return res.status(400).json({ error: 'Invalid username' });
   }
+  
   if (String(password).length < 6) {
-    return res.status(400).json({ error: "Password must be 6+ characters" });
+    return res.status(400).json({ error: 'Password must be 6+ characters' });
   }
+
   try {
-    const result = withDb((db) => {
-      if (Object.values(db.users).some((u) => u.username.toLowerCase() === username.toLowerCase())) {
-        throw Object.assign(new Error("Username already taken"), { status: 409 });
+    const result = await transaction(async (client) => {
+      // Check if username exists
+      const existingUser = await client.query(
+        'SELECT id FROM users WHERE LOWER(username) = LOWER($1)',
+        [username]
+      );
+      if (existingUser.rows.length > 0) {
+        throw Object.assign(new Error('Username already taken'), { status: 409 });
       }
-      if (Object.values(db.users).some((u) => (u.email || "").toLowerCase() === String(email).toLowerCase())) {
-        throw Object.assign(new Error("Email already registered"), { status: 409 });
+
+      // Check if email exists
+      const existingEmail = await client.query(
+        'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+        [email.toLowerCase()]
+      );
+      if (existingEmail.rows.length > 0) {
+        throw Object.assign(new Error('Email already registered'), { status: 409 });
       }
+
       const id = uid();
-      const { salt, hash } = hashPass(password);
+      const passwordHash = await hashPassword(password);
       const now = new Date().toISOString();
-      const invite = username.toUpperCase().slice(0, 4) + crypto.randomBytes(2).toString("hex").toUpperCase();
-      const palette = ["#F5C800", "#A7D8DE", "#C4B5FD", "#F9A8D4", "#86EFAC", "#FDBA74"];
+      const invite = username.toUpperCase().slice(0, 4) + crypto.randomBytes(2).toString('hex').toUpperCase();
+      
+      const palette = ['#F5C800', '#A7D8DE', '#C4B5FD', '#F9A8D4', '#86EFAC', '#FDBA74'];
       let avatarHash = 0;
-      for (const char of String(username).toLowerCase()) avatarHash = (avatarHash * 31 + char.charCodeAt(0)) >>> 0;
-      const user = {
-        id,
-        username,
-        email: String(email).toLowerCase(),
-        display_name: String(displayName).trim(),
-        passwordSalt: salt,
-        passwordHash: hash,
-        photo_url: null,
-        avatar_config: { background: palette[avatarHash % palette.length], letter: username[0].toUpperCase() },
-        banner_url: "",
-        bio: "",
-        pronouns: "",
-        timezone: "UTC",
-        social_links: {},
-        is_admin: false,
-        is_banned: false,
-        is_suspended: false,
-        suspension_end: null,
-        suspend_reason: null,
-        created_at: now,
-        last_seen_at: now,
-        xp: 0,
-        level: 1,
-        streak: 0,
-        best_streak: 0,
-        missed_days: 0,
-        warned: false,
-        kick_status: "ok",
-        kicked_from_room: false,
-        proofs_count: 0,
-        completed_rooms: 0,
-        joined_rooms: 0,
-        join_timestamp: now,
-        consistency_score: 0,
-        near_miss_count: 0,
-        league: "bronze",
-        grace_active: false,
-        grace_start_date: null,
-        grace_days_total: 0,
-        total_grace_used: 0,
-        last_submit_date: null,
-        vulture_claimed: null,
-        onboarding_complete: false,
-        onboarding_questions_complete: false,
-        niche: "",
-        age_range: "",
-        room_joined_at: null,
-        onboard_bonus_awarded: false,
-        safety_accepted: false,
-        invite_code: invite,
-        invites_count: 0,
-        burned_at: null,
-        following: [],
-        premium: false,
-      };
-      db.users[id] = user;
-      const tok = tokenFor(id);
-      db.sessions[tok] = { userId: id, createdAt: now };
-      return { token: tok, user: selfUser(user), _sync: { email: user.email, password, username, displayName: user.display_name, id } };
+      for (const char of String(username).toLowerCase()) {
+        avatarHash = (avatarHash * 31 + char.charCodeAt(0)) >>> 0;
+      }
+
+      await client.query(
+        `INSERT INTO users (
+          id, username, email, display_name, password_hash,
+          avatar_config, created_at, last_seen_at, xp, level, streak,
+          best_streak, missed_days, warned, kick_status, kicked_from_room,
+          proofs_count, completed_rooms, joined_rooms, join_timestamp,
+          consistency_score, near_miss_count, league, grace_active,
+          grace_start_date, grace_days_total, total_grace_used,
+          last_submit_date, onboarding_complete, onboarding_questions_complete,
+          niche, age_range, room_joined_at, onboard_bonus_awarded,
+          safety_accepted, invite_code, invites_count, burned_at,
+          following, premium, xp_awarded_keys
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42)`,
+        [
+          id, username, email.toLowerCase(), displayName.trim(), passwordHash,
+          JSON.stringify({ background: palette[avatarHash % palette.length], letter: username[0].toUpperCase() }),
+          now, now, 0, 1, 0, 0, 0, false, 'ok', false,
+          0, 0, 0, now, 0, 0, 'bronze', false,
+          null, 0, 0, null, false, false,
+          '', '', null, false, null, false,
+          0, null, '[]', false, '{}'
+        ]
+      );
+
+      const token = await createSession(id, req.ip, req.headers['user-agent']);
+      
+      const userResult = await client.query('SELECT * FROM users WHERE id = $1', [id]);
+      return { token, user: selfUser(userResult.rows[0]) };
     });
-    // Mirror into Auth before responding so client sign-in can succeed immediately.
-    const sync = result._sync;
-    delete result._sync;
-    if (sync) {
-      await ensureSupabaseAuthUser({
-        email: sync.email,
-        password: sync.password,
-        metadata: { username: sync.username, display_name: sync.displayName, capitol_id: sync.id },
-      }).catch(() => {});
-    }
+
     res.json(result);
   } catch (e) {
-    res.status(e.status || 500).json({ error: e.message || "Signup failed" });
+    if (e.message === 'Database not configured') {
+      return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
+    }
+    res.status(e.status || 500).json({ error: e.message || 'Signup failed' });
   }
 });
 
-app.post("/api/auth/login", (req, res) => {
+app.post('/api/auth/login', authRateLimiter, async (req, res) => {
   const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "Missing fields" });
-  const db = loadDb();
-  const user = Object.values(db.users).find(
-    (u) => (u.email || "").toLowerCase() === String(email).toLowerCase()
-  );
-  if (!user || !checkPass(password, user.passwordSalt, user.passwordHash)) {
-    return res.status(401).json({ error: "Invalid email or password" });
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Missing fields' });
   }
-  if (user.is_banned) return res.status(403).json({ error: "Account banned" });
-  const tok = tokenFor(user.id);
-  user.last_seen_at = new Date().toISOString();
-  db.sessions[tok] = { userId: user.id, createdAt: new Date().toISOString() };
-  saveDb(db);
-  ensureSupabaseAuthUser({
-    email: user.email,
-    password,
-    metadata: { username: user.username, display_name: user.display_name, capitol_id: user.id },
-  }).catch(() => {});
-  res.json({ token: tok, user: selfUser(user) });
+
+  try {
+    const result = await query(
+      'SELECT * FROM users WHERE LOWER(email) = LOWER($1)',
+      [email.toLowerCase()]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = result.rows[0];
+
+    if (user.is_banned) {
+      return res.status(403).json({ error: 'Account banned' });
+    }
+
+    const isValid = await verifyPassword(password, user.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Update last seen
+    await query(
+      'UPDATE users SET last_seen_at = NOW() WHERE id = $1',
+      [user.id]
+    );
+
+    const token = await createSession(user.id, req.ip, req.headers['user-agent']);
+    
+    res.json({ token, user: selfUser(user) });
+  } catch (e) {
+    if (e.message === 'Database not configured') {
+      return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
+    }
+    console.error('Login error:', e);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/auth/logout', authenticate, async (req, res) => {
+  await destroySession(req.token);
+  res.json({ ok: true });
 });
 
 // ── Users ────────────────────────────────────────────────────────────────────
-app.get("/api/users/check/:username", (req, res) => {
-  const db = loadDb();
-  const taken = Object.values(db.users).some(
-    (u) => u.username.toLowerCase() === String(req.params.username).toLowerCase()
+app.get('/api/users/check/:username', async (req, res) => {
+  const result = await query(
+    'SELECT id FROM users WHERE LOWER(username) = LOWER($1)',
+    [req.params.username]
   );
-  res.json({ taken });
+  res.json({ taken: result.rows.length > 0 });
 });
 
-app.get("/api/users", optionalAuth, (req, res) => {
-  const db = loadDb();
-  const users = Object.values(db.users)
-    .filter((u) => !u.is_banned)
-    .map(publicUser);
-  res.json({ users });
+app.get('/api/users', optionalAuth, async (req, res) => {
+  const result = await query(
+    'SELECT * FROM users WHERE is_banned = false ORDER BY created_at DESC LIMIT 100'
+  );
+  res.json({ users: result.rows.map(publicUser) });
 });
 
-app.get("/api/users/:id", optionalAuth, (req, res) => {
-  const db = loadDb();
-  const user = findUser(db, req.params.id);
-  if (!user || user.is_banned) return res.status(404).json({ error: "Not found" });
+app.get('/api/users/:id', optionalAuth, async (req, res) => {
+  const result = await query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+  
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const user = result.rows[0];
+  if (user.is_banned) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   const isSelf = req.user && req.user.id === user.id;
   res.json({ user: isSelf ? selfUser(user) : publicUser(user) });
 });
 
-app.patch("/api/users/me", auth, (req, res) => {
+app.patch('/api/users/me', authenticate, async (req, res) => {
   const body = req.body || {};
-  for (const key of ["photo_url", "banner_url"]) {
-    if (key in body && body[key] != null && /^(blob:|data:)/i.test(String(body[key]))) {
-      return res.status(400).json({ error: "Temporary image URLs cannot be saved." });
+  const allowed = [
+    'display_name', 'photo_url', 'avatar_config', 'banner_url', 'bio', 'pronouns',
+    'timezone', 'social_links', 'niche', 'age_range', 'safety_accepted'
+  ];
+
+  const updates = [];
+  const values = [];
+  let paramCount = 1;
+
+  for (const key of allowed) {
+    if (key in body) {
+      updates.push(`${key} = $${paramCount}`);
+      values.push(body[key]);
+      paramCount++;
     }
   }
-  const allowed = [
-    "display_name", "photo_url", "avatar_config", "banner_url", "bio", "pronouns", "timezone",
-    "social_links", "xp", "streak", "level", "missed_days", "last_submit_date",
-    "warned", "kick_status", "kicked_from_room", "completed_rooms", "joined_rooms",
-    "safety_accepted", "safety_accepted_at", "room_joined_at", "join_timestamp",
-    "onboarding_complete", "onboarding_questions_complete", "niche", "age_range",
-    "onboard_bonus_awarded", "vulture_claimed", "last_seen_date",
-    "grace_used_this_month", "grace_last_month", "grace_active", "grace_start_date",
-    "grace_days_total", "burned_at", "following", "premium", "best_streak",
-    "proofs_count", "league",
-  ];
-  withDb((db) => {
-    const u = db.users[req.user.id];
-    if (!u) return;
-    for (const k of allowed) {
-      if (k in body) u[k] = body[k];
-    }
-    if ("xp" in body) u.level = calcLevel(body.xp);
-    u.last_seen_at = new Date().toISOString();
-    res.json({ user: selfUser(u) });
-  });
-});
 
-app.post("/api/users/follow/:targetId", auth, (req, res) => {
-  withDb((db) => {
-    const me = db.users[req.user.id];
-    const target = findUser(db, req.params.targetId);
-    if (!target) return res.status(404).json({ error: "Not found" });
-    if (target.id === me.id) return res.status(400).json({ error: "Cannot follow self" });
-    const key = me.id + "->" + target.id;
-    db.follows[key] = { from: me.id, to: target.id, at: new Date().toISOString() };
-    const init = (target.username || "?").slice(0, 2).toUpperCase();
-    if (!Array.isArray(me.following)) me.following = [];
-    if (!me.following.includes(init)) me.following.push(init);
-    const nid = rid("notif");
-    db.notifications[nid] = {
-      id: nid,
-      user_id: target.id,
-      type: "follow",
-      read: false,
-      created_at: new Date().toISOString(),
-      data: JSON.stringify({ fromUid: me.id, fromName: me.display_name, fromUsername: me.username }),
-    };
-    res.json({ ok: true });
-  });
-});
+  if (updates.length === 0) {
+    return res.json({ user: selfUser(req.user) });
+  }
 
-app.delete("/api/users/follow/:targetId", auth, (req, res) => {
-  withDb((db) => {
-    const me = db.users[req.user.id];
-    const target = findUser(db, req.params.targetId);
-    if (!target) return res.status(404).json({ error: "Not found" });
-    delete db.follows[me.id + "->" + target.id];
-    const init = (target.username || "?").slice(0, 2).toUpperCase();
-    me.following = (me.following || []).filter((x) => x !== init);
-    res.json({ ok: true });
-  });
-});
+  values.push(req.user.id);
 
-app.post("/api/users/:id/ban", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  withDb((db) => {
-    const u = findUser(db, req.params.id);
-    if (!u) return res.status(404).json({ error: "Not found" });
-    u.is_banned = true;
-    res.json({ ok: true });
-  });
-});
+  try {
+    await query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramCount}`,
+      values
+    );
 
-app.post("/api/users/:id/unban", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  withDb((db) => {
-    const u = findUser(db, req.params.id);
-    if (!u) return res.status(404).json({ error: "Not found" });
-    u.is_banned = false;
-    res.json({ ok: true });
-  });
-});
-
-app.post("/api/users/:id/suspend", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  const hours = Number(req.body?.hours || 24);
-  withDb((db) => {
-    const u = findUser(db, req.params.id);
-    if (!u) return res.status(404).json({ error: "Not found" });
-    u.is_suspended = true;
-    u.suspension_end = new Date(Date.now() + hours * 3600000).toISOString();
-    u.suspend_reason = req.body?.reason || "";
-    res.json({ ok: true });
-  });
+    const result = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    res.json({ user: selfUser(result.rows[0]) });
+  } catch (e) {
+    console.error('User update error:', e);
+    res.status(500).json({ error: 'Update failed' });
+  }
 });
 
 // ── Rooms ────────────────────────────────────────────────────────────────────
-app.get("/api/rooms", optionalAuth, (req, res) => {
-  const db = loadDb();
-  const rooms = Object.values(db.rooms).map((r) => serializeRoom(db, r));
+app.get('/api/rooms', optionalAuth, async (req, res) => {
+  const result = await query(
+    `SELECT r.*, 
+     (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id AND rm.status = 'active') as member_count
+     FROM rooms r 
+     WHERE r.status = 'active'
+     ORDER BY r.created_at DESC`
+  );
+
+  const rooms = result.rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    icon: r.icon || 'bolt',
+    goal: r.goal || '',
+    niche: r.niche || 'general',
+    age_range: r.age_range || null,
+    tags: r.tags || [],
+    max_members: r.max_members || 8,
+    member_count: parseInt(r.member_count) || 0,
+    elite: !!r.elite,
+    days: r.days || 30,
+    created_at: r.created_at,
+    creator_uid: r.creator_uid || null,
+  }));
+
   res.json({ rooms });
 });
 
-app.post("/api/rooms", auth, (req, res) => {
-  const b = req.body || {};
-  const result = withDb((db) => {
-    const id = rid("room");
-    const room = {
-      id,
-      name: b.name || "Room",
-      icon: b.icon || "bolt",
-      goal: b.goal || "",
-      niche: b.niche || "general",
-      age_range: b.ageRange || b.age_range || null,
-      tags: b.tags || [],
-      max_members: b.maxMembers || b.max || 8,
-      elite: !!b.elite,
-      days: b.days || 30,
-      created_at: new Date().toISOString(),
-      creator_uid: req.user.id,
-    };
-    db.rooms[id] = room;
-    const mid = rid("rm");
-    db.roomMembers[mid] = {
-      id: mid,
-      roomId: id,
-      userId: req.user.id,
-      status: "active",
-      joinedAt: new Date().toISOString(),
-    };
-    const u = db.users[req.user.id];
-    if (u) {
-      u.room_joined_at = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-      u.joined_rooms = (u.joined_rooms || 0) + 1;
+app.get('/api/rooms/:id', optionalAuth, async (req, res) => {
+  const result = await query('SELECT * FROM rooms WHERE id = $1', [req.params.id]);
+  
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+
+  const room = result.rows[0];
+
+  // Check membership status
+  let membership = 'none';
+  if (req.user) {
+    const memberResult = await query(
+      `SELECT * FROM room_members 
+       WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
+      [room.id, req.user.id]
+    );
+
+    if (memberResult.rows.length > 0) {
+      membership = 'active';
+    } else {
+      // Check if user was kicked
+      const userResult = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+      const user = userResult.rows[0];
+      
+      if (user && user.kicked_from_room && user.kick_status !== 'ok') {
+        membership = 'kicked';
+        return res.json({
+          room: {
+            id: room.id,
+            name: room.name,
+            icon: room.icon || 'bolt',
+            goal: room.goal || '',
+            niche: room.niche || 'general',
+            age_range: room.age_range || null,
+            tags: room.tags || [],
+            max_members: room.max_members || 8,
+            member_count: 0,
+            elite: !!room.elite,
+            days: room.days || 30,
+            created_at: room.created_at,
+            creator_uid: room.creator_uid || null,
+          },
+          membership: 'kicked',
+          kickStatus: user.kick_status,
+          kickReason: user.kick_status === 'inactive' ? 'Inactive for 3+ days' : 'Removed from room',
+          burnedAt: user.burned_at
+        });
+      }
     }
-    return { room: serializeRoom(db, room) };
+  }
+
+  const memberCountResult = await query(
+    `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
+    [room.id]
+  );
+
+  res.json({
+    room: {
+      id: room.id,
+      name: room.name,
+      icon: room.icon || 'bolt',
+      goal: room.goal || '',
+      niche: room.niche || 'general',
+      age_range: room.age_range || null,
+      tags: room.tags || [],
+      max_members: room.max_members || 8,
+      member_count: parseInt(memberCountResult.rows[0].count) || 0,
+      elite: !!room.elite,
+      days: room.days || 30,
+      created_at: room.created_at,
+      creator_uid: room.creator_uid || null,
+    },
+    membership
   });
-  res.json(result);
 });
 
-app.post("/api/rooms/:id/join", auth, (req, res) => {
+app.post('/api/rooms', authenticate, async (req, res) => {
+  const { name, icon, goal, niche, ageRange, tags, maxMembers, elite, days } = req.body || {};
+
   try {
-    withDb((db) => {
-      const room = db.rooms[req.params.id];
-      if (!room) throw Object.assign(new Error("Room not found"), { status: 404 });
-      const members = roomMembers(db, room.id);
-      if (members.length >= (room.max_members || 8)) {
-        throw Object.assign(new Error("Room is full"), { status: 400 });
-      }
-      // Leave any other active room first (one room at a time)
-      for (const m of Object.values(db.roomMembers)) {
-        if (m.userId === req.user.id && m.status === "active") m.status = "left";
-      }
-      const existing = Object.values(db.roomMembers).find(
-        (m) => m.roomId === room.id && m.userId === req.user.id
+    const result = await transaction(async (client) => {
+      const id = rid('room');
+      const now = new Date().toISOString();
+
+      await client.query(
+        `INSERT INTO rooms (id, name, icon, goal, niche, age_range, tags, max_members, elite, days, created_at, creator_uid, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active')`,
+        [id, name || 'Room', icon || 'bolt', goal || '', niche || 'general', ageRange || null,
+         JSON.stringify(tags || []), maxMembers || 8, !!elite, days || 30, now, req.user.id]
       );
-      if (existing) {
-        existing.status = "active";
-        existing.joinedAt = new Date().toISOString();
-      } else {
-        const mid = rid("rm");
-        db.roomMembers[mid] = {
-          id: mid,
-          roomId: room.id,
-          userId: req.user.id,
-          status: "active",
-          joinedAt: new Date().toISOString(),
-        };
-      }
-      const u = db.users[req.user.id];
-      if (u) {
-        u.room_joined_at = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-        u.joined_rooms = (u.joined_rooms || 0) + 1;
-      }
-      res.json({ ok: true, room: serializeRoom(db, room) });
+
+      // Add creator as first member
+      const memberId = rid('rm');
+      await client.query(
+        `INSERT INTO room_members (id, room_id, user_id, status, joined_at)
+         VALUES ($1, $2, $3, 'active', $4)`,
+        [memberId, id, req.user.id, now]
+      );
+
+      // Update user stats
+      await client.query(
+        `UPDATE users 
+         SET room_joined_at = $1, joined_rooms = joined_rooms + 1 
+         WHERE id = $2`,
+        [now, req.user.id]
+      );
+
+      return { id };
     });
+
+    const roomResult = await query('SELECT * FROM rooms WHERE id = $1', [result.id]);
+    const memberCountResult = await query(
+      `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
+      [result.id]
+    );
+
+    res.json({
+      room: {
+        id: roomResult.rows[0].id,
+        name: roomResult.rows[0].name,
+        icon: roomResult.rows[0].icon || 'bolt',
+        goal: roomResult.rows[0].goal || '',
+        niche: roomResult.rows[0].niche || 'general',
+        age_range: roomResult.rows[0].age_range || null,
+        tags: roomResult.rows[0].tags || [],
+        max_members: roomResult.rows[0].max_members || 8,
+        member_count: parseInt(memberCountResult.rows[0].count) || 0,
+        elite: !!roomResult.rows[0].elite,
+        days: roomResult.rows[0].days || 30,
+        created_at: roomResult.rows[0].created_at,
+        creator_uid: roomResult.rows[0].creator_uid || null,
+      }
+    });
+  } catch (e) {
+    console.error('Room creation error:', e);
+    res.status(500).json({ error: 'Room creation failed' });
+  }
+});
+
+app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
+  try {
+    await transaction(async (client) => {
+      const roomResult = await client.query('SELECT * FROM rooms WHERE id = $1', [req.params.id]);
+      
+      if (roomResult.rows.length === 0) {
+        throw Object.assign(new Error('Room not found'), { status: 404 });
+      }
+
+      const room = roomResult.rows[0];
+
+      // Check capacity
+      const memberCount = await client.query(
+        `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
+        [room.id]
+      );
+
+      if (parseInt(memberCount.rows[0].count) >= (room.max_members || 8)) {
+        throw Object.assign(new Error('Room is full'), { status: 400 });
+      }
+
+      // Leave other active rooms
+      await client.query(
+        `UPDATE room_members SET status = 'left', left_at = NOW() 
+         WHERE user_id = $1 AND status = 'active'`,
+        [req.user.id]
+      );
+
+      // Check if already in this room
+      const existingMember = await client.query(
+        `SELECT * FROM room_members WHERE room_id = $1 AND user_id = $2`,
+        [room.id, req.user.id]
+      );
+
+      if (existingMember.rows.length > 0) {
+        await client.query(
+          `UPDATE room_members SET status = 'active', joined_at = NOW(), left_at = NULL 
+           WHERE id = $1`,
+          [existingMember.rows[0].id]
+        );
+      } else {
+        const memberId = rid('rm');
+        await client.query(
+          `INSERT INTO room_members (id, room_id, user_id, status, joined_at)
+           VALUES ($1, $2, $3, 'active', $4)`,
+          [memberId, room.id, req.user.id, new Date().toISOString()]
+        );
+      }
+
+      // Update user stats
+      await client.query(
+        `UPDATE users 
+         SET room_joined_at = $1, joined_rooms = joined_rooms + 1 
+         WHERE id = $2`,
+        [new Date().toISOString(), req.user.id]
+      );
+    });
+
+    res.json({ ok: true });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
 });
 
-app.post("/api/rooms/:id/leave", auth, (req, res) => {
-  withDb((db) => {
-    for (const m of Object.values(db.roomMembers)) {
-      if (m.roomId === req.params.id && m.userId === req.user.id && m.status === "active") {
-        m.status = "left";
+app.post('/api/rooms/:id/leave', authenticate, async (req, res) => {
+  try {
+    await transaction(async (client) => {
+      await client.query(
+        `UPDATE room_members SET status = 'left', left_at = NOW() 
+         WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
+        [req.params.id, req.user.id]
+      );
+
+      await client.query(
+        `UPDATE users SET room_joined_at = NULL WHERE id = $1`,
+        [req.user.id]
+      );
+
+      // Check if room needs replacement
+      const memberCount = await client.query(
+        `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
+        [req.params.id]
+      );
+
+      const configResult = await client.query("SELECT value FROM config WHERE key = 'system'");
+      const config = configResult.rows[0]?.value || {};
+      const minRoomSize = config.minRoomSize || 3;
+
+      if (parseInt(memberCount.rows[0].count) > 0 && parseInt(memberCount.rows[0].count) < minRoomSize) {
+        // Queue replacement
+        const replacementId = rid('rep');
+        await client.query(
+          `INSERT INTO replacement_queue (id, room_id, status, created_at, attempts)
+           VALUES ($1, $2, 'pending', NOW(), 0)`,
+          [replacementId, req.params.id]
+        );
       }
-    }
-    const u = db.users[req.user.id];
-    if (u) u.room_joined_at = null;
-    
-    // Queue replacement if room is below minimum size
-    const room = db.rooms[req.params.id];
-    if (room) {
-      const members = roomMembers(db, room.id);
-      const minRoomSize = db.config?.minRoomSize || 3;
-      // Only queue if room has at least 1 member (don't queue replacement for empty rooms)
-      if (members.length > 0 && members.length < minRoomSize) {
-        queueReplacement(db, room.id);
-      }
-    }
-    
+    });
+
     res.json({ ok: true });
-  });
+  } catch (e) {
+    console.error('Leave room error:', e);
+    res.status(500).json({ error: 'Leave failed' });
+  }
 });
 
-app.post("/api/rooms/:id/kick", auth, (req, res) => {
-  const targetId = req.body?.targetId;
-  withDb((db) => {
-    const room = db.rooms[req.params.id];
-    if (!room) return res.status(404).json({ error: "Not found" });
-    const target = findUser(db, targetId);
-    if (!target) return res.status(404).json({ error: "User not found" });
-    for (const m of Object.values(db.roomMembers)) {
-      if (m.roomId === room.id && m.userId === target.id && m.status === "active") {
-        m.status = "kicked";
+app.post('/api/rooms/:id/kick', authenticate, async (req, res) => {
+  const { targetId, reason } = req.body || {};
+
+  try {
+    await transaction(async (client) => {
+      const roomResult = await client.query('SELECT * FROM rooms WHERE id = $1', [req.params.id]);
+      
+      if (roomResult.rows.length === 0) {
+        throw Object.assign(new Error('Room not found'), { status: 404 });
       }
-    }
-    target.kicked_from_room = true;
-    target.kick_status = "kicked";
-    target.xp = Math.max(0, (target.xp || 0) - 20);
-    target.burned_at = new Date().toISOString();
-    
-    // Queue replacement if room is below minimum size
-    const members = roomMembers(db, room.id);
-    const minRoomSize = db.config?.minRoomSize || 3;
-    // Only queue if room has at least 1 member (don't queue replacement for empty rooms)
-    if (members.length > 0 && members.length < minRoomSize) {
-      queueReplacement(db, room.id);
-    }
-    
+
+      const userResult = await client.query('SELECT * FROM users WHERE id = $1', [targetId]);
+      
+      if (userResult.rows.length === 0) {
+        throw Object.assign(new Error('User not found'), { status: 404 });
+      }
+
+      // Update room member status
+      await client.query(
+        `UPDATE room_members SET status = 'kicked' 
+         WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
+        [req.params.id, targetId]
+      );
+
+      // Update user status
+      const kickReason = reason === 'inactive' ? 'inactive' : 'kicked';
+      await client.query(
+        `UPDATE users 
+         SET kicked_from_room = true, 
+             kick_status = $1, 
+             burned_at = NOW()
+         WHERE id = $2`,
+        [kickReason, targetId]
+      );
+
+      // Apply XP penalty
+      await updateUserXP(client, targetId, -20, 'kick_penalty');
+
+      // Create notification
+      const notifId = rid('notif');
+      await client.query(
+        `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+         VALUES ($1, $2, 'kick', false, NOW(), $3)`,
+        [notifId, targetId, JSON.stringify({
+          reason: reason === 'inactive' ? 'Inactive for 3+ days' : 'Removed from room',
+          roomId: req.params.id,
+          roomName: roomResult.rows[0].name
+        })]
+      );
+
+      // Check if room needs replacement
+      const memberCount = await client.query(
+        `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
+        [req.params.id]
+      );
+
+      const configResult = await client.query("SELECT value FROM config WHERE key = 'system'");
+      const config = configResult.rows[0]?.value || {};
+      const minRoomSize = config.minRoomSize || 3;
+
+      if (parseInt(memberCount.rows[0].count) > 0 && parseInt(memberCount.rows[0].count) < minRoomSize) {
+        const replacementId = rid('rep');
+        await client.query(
+          `INSERT INTO replacement_queue (id, room_id, status, created_at, attempts)
+           VALUES ($1, $2, 'pending', NOW(), 0)`,
+          [replacementId, req.params.id]
+        );
+      }
+    });
+
     res.json({ ok: true });
-  });
+  } catch (e) {
+    console.error('Kick error:', e);
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ── Proofs ───────────────────────────────────────────────────────────────────
-app.get("/api/proofs", optionalAuth, (req, res) => {
-  const db = loadDb();
-  const userId = req.query.userId;
-  const limit = Number(req.query.limit || 50);
-  let proofs = Object.values(db.proofs);
+app.get('/api/proofs', optionalAuth, async (req, res) => {
+  const { userId, limit = 50 } = req.query;
+  
+  let queryText = `
+    SELECT p.*, u.display_name as user_name, u.photo_url as user_photo
+    FROM proofs p
+    LEFT JOIN users u ON p.user_id = u.id
+  `;
+  const params = [];
+
   if (userId) {
-    const u = findUser(db, userId);
-    proofs = proofs.filter((p) => p.user_id === userId || (u && p.user_id === u.id));
+    queryText += ' WHERE p.user_id = $1';
+    params.push(userId);
   }
-  proofs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  const enriched = proofs.slice(0, limit).map((p) => {
-    const owner = findUser(db, p.user_id);
-    return {
-      ...p,
-      user_name: owner?.display_name || "",
-      user_photo: owner?.photo_url || null,
-    };
-  });
-  res.json({ proofs: enriched });
+
+  queryText += ' ORDER BY p.created_at DESC LIMIT $' + (params.length + 1);
+  params.push(parseInt(limit));
+
+  const result = await query(queryText, params);
+  
+  const proofs = result.rows.map(p => ({
+    id: p.id,
+    user_id: p.user_id,
+    date_key: p.date_key,
+    created_at: p.created_at,
+    image_url: p.image_url,
+    link: p.link,
+    note: p.note,
+    streak: p.streak,
+    xp_earned: p.xp_earned,
+    ai_verdict: p.ai_verdict,
+    room_id: p.room_id,
+    votes: typeof p.votes === 'string' ? JSON.parse(p.votes) : p.votes,
+    gesture: p.gesture,
+    user_name: p.user_name || '',
+    user_photo: p.user_photo || null,
+  }));
+
+  res.json({ proofs });
 });
 
-app.post("/api/proofs", auth, (req, res) => {
-  const b = req.body || {};
-  const result = withDb((db) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const u = db.users[req.user.id];
-    const existing = Object.values(db.proofs).find((p) => p.user_id === req.user.id && p.date_key === today);
-    if (existing) {
-      return { proof: existing, stats: { xp: u.xp, level: u.level, streak: u.streak || 0, xpGained: 0 }, duplicate: true };
-    }
-    const id = rid("proof");
-    const dates = new Set(Object.values(db.proofs)
-      .filter((p) => p.user_id === req.user.id && p.ai_verdict === "approved")
-      .map((p) => p.date_key));
-    dates.add(today);
-    let newStreak = 0;
-    const cursor = new Date(`${today}T00:00:00Z`);
-    while (dates.has(cursor.toISOString().slice(0, 10))) {
-      newStreak += 1;
-      cursor.setUTCDate(cursor.getUTCDate() - 1);
-    }
-    const xpGain = 10 + Math.min(newStreak, 30) * 2;
-    const proof = {
-      id,
-      user_id: req.user.id,
-      date_key: today,
-      created_at: new Date().toISOString(),
-      image_url: b.imageUrl || b.image || null,
-      link: b.link || "",
-      note: b.note || "",
-      streak: newStreak,
-      xp_earned: xpGain,
-      ai_verdict: "approved",
-      room_id: b.roomId || null,
-      votes: "{}",
-      gesture: b.gesture || null,
-    };
-    db.proofs[id] = proof;
-    u.streak = newStreak;
-    u.best_streak = Math.max(u.best_streak || 0, newStreak);
-    u.xp = (u.xp || 0) + xpGain;
-    u.level = calcLevel(u.xp);
-    u.last_submit_date = today;
-    u.proofs_count = (u.proofs_count || 0) + 1;
-    u.missed_days = 0;
-    u.warned = false;
-    db.streaks[u.id] = {
-      user_id: u.id,
-      current_streak: newStreak,
-      best_streak: Math.max(u.best_streak || 0, newStreak),
-      last_qualifying_date: today,
-      updated_at: new Date().toISOString(),
-    };
-    const milestones = [
-      [1, "First Day", "Completed your first qualifying proof."],
-      [3, "Early Momentum", "Maintained a 3 day streak."],
-      [7, "Weekly Consistency", "Maintained a 7 day streak."],
-      [13, "Elite Consistency", "Maintained a 13 day streak."],
-    ];
-    for (const [days, name, description] of milestones) {
-      if (newStreak >= days) {
-        const key = `${u.id}:${days}`;
-        if (!db.userAchievements[key]) {
-          db.achievements[days] = { days, name, description };
-          db.userAchievements[key] = { id: key, user_id: u.id, achievement_days: days, unlocked_at: new Date().toISOString() };
+app.post('/api/proofs', authenticate, proofRateLimiter, async (req, res) => {
+  const { imageUrl, link, note, gesture, roomId } = req.body || {};
+
+  try {
+    const result = await transaction(async (client) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const userId = req.user.id;
+
+      // Check for duplicate proof today
+      const existingProof = await client.query(
+        `SELECT * FROM proofs WHERE user_id = $1 AND date_key = $2`,
+        [userId, today]
+      );
+
+      if (existingProof.rows.length > 0) {
+        return { 
+          proof: existingProof.rows[0], 
+          stats: { xp: req.user.xp, level: req.user.level, streak: req.user.streak, xpGained: 0 }, 
+          duplicate: true 
+        };
+      }
+
+      // Calculate streak
+      const proofDates = await client.query(
+        `SELECT date_key FROM proofs WHERE user_id = $1 AND ai_verdict = 'approved' ORDER BY date_key`,
+        [userId]
+      );
+
+      const dates = new Set(proofDates.rows.map(p => p.date_key));
+      dates.add(today);
+      
+      let newStreak = 0;
+      const cursor = new Date(`${today}T00:00:00Z`);
+      while (dates.has(cursor.toISOString().slice(0, 10))) {
+        newStreak += 1;
+        cursor.setUTCDate(cursor.getUTCDate() - 1);
+      }
+
+      const xpGain = 10 + Math.min(newStreak, 30) * 2;
+      const proofId = rid('proof');
+
+      // Insert proof
+      await client.query(
+        `INSERT INTO proofs (id, user_id, date_key, created_at, image_url, link, note, streak, xp_earned, ai_verdict, room_id, votes, gesture)
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, 'approved', $9, '{}', $10)`,
+        [proofId, userId, today, imageUrl || null, link || '', note || '', newStreak, xpGain, roomId || null, gesture || null]
+      );
+
+      // Update user stats
+      await client.query(
+        `UPDATE users 
+         SET streak = $1, 
+             best_streak = GREATEST(best_streak, $1),
+             last_submit_date = $2,
+             proofs_count = proofs_count + 1,
+             missed_days = 0,
+             warned = false
+         WHERE id = $3`,
+        [newStreak, today, userId]
+      );
+
+      // Update XP
+      await updateUserXP(client, userId, xpGain, 'proof');
+
+      // Update streaks table
+      await client.query(
+        `INSERT INTO streaks (user_id, current_streak, best_streak, last_qualifying_date, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           current_streak = $2,
+           best_streak = GREATEST(streaks.best_streak, $3),
+           last_qualifying_date = $4,
+           updated_at = NOW()`,
+        [userId, newStreak, newStreak, today]
+      );
+
+      // Check achievements
+      const milestones = [
+        [1, 'First Day', 'Completed your first qualifying proof.'],
+        [3, 'Early Momentum', 'Maintained a 3 day streak.'],
+        [7, 'Weekly Consistency', 'Maintained a 7 day streak.'],
+        [13, 'Elite Consistency', 'Maintained a 13 day streak.'],
+      ];
+
+      for (const [days, name, description] of milestones) {
+        if (newStreak >= days) {
+          await client.query(
+            `INSERT INTO user_achievements (id, user_id, achievement_days, unlocked_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (user_id, achievement_days) DO NOTHING`,
+            [rid('ua'), userId, days]
+          );
         }
       }
-    }
-    return {
-      proof,
-      stats: { xp: u.xp, level: u.level, streak: u.streak, xpGained: xpGain },
-    };
-  });
-  res.json(result);
+
+      // Get updated user
+      const userResult = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
+      const user = userResult.rows[0];
+
+      return {
+        proof: { id: proofId, user_id: userId, date_key: today, created_at: new Date().toISOString() },
+        stats: { xp: user.xp, level: user.level, streak: user.streak, xpGained: xpGain }
+      };
+    });
+
+    res.json(result);
+  } catch (e) {
+    console.error('Proof submission error:', e);
+    res.status(500).json({ error: 'Proof submission failed' });
+  }
 });
 
 // ── Notifications ────────────────────────────────────────────────────────────
-app.get("/api/notifications", auth, (req, res) => {
-  const db = loadDb();
-  const list = Object.values(db.notifications)
-    .filter((n) => n.user_id === req.user.id)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  res.json({ notifications: list });
+app.get('/api/notifications', authenticate, async (req, res) => {
+  const result = await query(
+    `SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+    [req.user.id]
+  );
+
+  const notifications = result.rows.map(n => ({
+    id: n.id,
+    type: n.type,
+    read: !!n.read,
+    created_at: n.created_at,
+    data: typeof n.data === 'string' ? JSON.parse(n.data) : n.data,
+  }));
+
+  res.json({ notifications });
 });
 
-app.post("/api/notifications", auth, (req, res) => {
+app.post('/api/notifications', authenticate, async (req, res) => {
   const { userId, type, data, eventKey } = req.body || {};
-  const target = findUser(loadDb(), userId);
-  if (!target) return res.status(404).json({ error: "Not found" });
-  // Anyone authenticated can create a notification for another user (friend request etc.)
-  // but cannot invent notifications as if from someone else without being themselves.
-  const result = withDb((db) => {
-    const duplicate = eventKey && Object.values(db.notifications).find((n) => {
-      if (n.user_id !== target.id) return false;
-      try { return JSON.parse(n.data || "{}").eventKey === eventKey; } catch { return false; }
-    });
-    if (duplicate) return { notification: duplicate, duplicate: true };
-    const id = rid("notif");
-    const n = {
-      id,
-      user_id: target.id,
-      type: type || "info",
-      read: false,
-      created_at: new Date().toISOString(),
-      data: JSON.stringify({ ...(data || {}), ...(eventKey ? { eventKey } : {}), fromUid: req.user.id }),
-    };
-    db.notifications[id] = n;
-    return { notification: n };
-  });
-  res.json(result);
+
+  try {
+    // Check for duplicate
+    if (eventKey) {
+      const existing = await query(
+        `SELECT * FROM notifications WHERE user_id = $1 AND data::text LIKE $2`,
+        [userId, `%${eventKey}%`]
+      );
+      if (existing.rows.length > 0) {
+        return res.json({ notification: existing.rows[0], duplicate: true });
+      }
+    }
+
+    const id = rid('notif');
+    await query(
+      `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+       VALUES ($1, $2, $3, false, NOW(), $4)`,
+      [id, userId, type || 'info', JSON.stringify({ ...(data || {}), ...(eventKey ? { eventKey } : {}), fromUid: req.user.id })]
+    );
+
+    res.json({ notification: { id, user_id: userId, type, read: false, created_at: new Date().toISOString() } });
+  } catch (e) {
+    console.error('Notification creation error:', e);
+    res.status(500).json({ error: 'Notification creation failed' });
+  }
 });
 
-app.post("/api/notifications/read", auth, (req, res) => {
-  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-  withDb((db) => {
-    for (const id of ids) {
-      const n = db.notifications[id];
-      if (n && n.user_id === req.user.id) n.read = true;
-    }
-  });
+app.post('/api/notifications/read', authenticate, async (req, res) => {
+  const { ids } = req.body || [];
+  
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.json({ ok: true });
+  }
+
+  await query(
+    `UPDATE notifications SET read = true WHERE id = ANY($1) AND user_id = $2`,
+    [ids, req.user.id]
+  );
+
   res.json({ ok: true });
 });
 
 // ── Leaderboard ──────────────────────────────────────────────────────────────
-app.get("/api/leaderboard", optionalAuth, (req, res) => {
-  const db = loadDb();
-  const leaderboard = Object.values(db.users)
-    .filter((u) => !u.is_banned)
-    .sort((a, b) => (b.xp || 0) - (a.xp || 0))
-    .slice(0, 200)
-    .map(publicUser);
-  res.json({ leaderboard });
-});
-
-// ── Challenges ───────────────────────────────────────────────────────────────
-app.get("/api/challenges", auth, (req, res) => {
-  const db = loadDb();
-  const list = Object.values(db.challenges).filter(
-    (c) => c.fromUid === req.user.id || c.toUid === req.user.id
+app.get('/api/leaderboard', optionalAuth, async (req, res) => {
+  const result = await query(
+    `SELECT * FROM users WHERE is_banned = false ORDER BY xp DESC LIMIT 200`
   );
-  res.json({ challenges: list });
-});
-
-app.post("/api/challenges", auth, (req, res) => {
-  const { challengedId, durationDays, stakes, message } = req.body || {};
-  const target = findUser(loadDb(), challengedId);
-  if (!target) return res.status(404).json({ error: "User not found" });
-  const result = withDb((db) => {
-    const id = rid("chal");
-    const c = {
-      id,
-      fromUid: req.user.id,
-      toUid: target.id,
-      durationDays: durationDays || 7,
-      stakes: stakes || 0,
-      message: message || "",
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    };
-    db.challenges[id] = c;
-    const nid = rid("notif");
-    db.notifications[nid] = {
-      id: nid,
-      user_id: target.id,
-      type: "challenge",
-      read: false,
-      created_at: new Date().toISOString(),
-      data: JSON.stringify({ challengeId: id, fromUid: req.user.id, fromName: req.user.display_name }),
-    };
-    return { challenge: c };
-  });
-  res.json(result);
-});
-
-app.post("/api/challenges/:id/accept", auth, (req, res) => {
-  withDb((db) => {
-    const c = db.challenges[req.params.id];
-    if (!c || c.toUid !== req.user.id) return res.status(404).json({ error: "Not found" });
-    c.status = "accepted";
-    res.json({ ok: true });
-  });
-});
-
-app.post("/api/challenges/:id/decline", auth, (req, res) => {
-  withDb((db) => {
-    const c = db.challenges[req.params.id];
-    if (!c || c.toUid !== req.user.id) return res.status(404).json({ error: "Not found" });
-    c.status = "declined";
-    res.json({ ok: true });
-  });
-});
-
-// ── Close friends ────────────────────────────────────────────────────────────
-app.get("/api/close-friends", auth, (req, res) => {
-  const db = loadDb();
-  const friends = Object.values(db.closeFriends)
-    .filter((f) => f.a === req.user.id || f.b === req.user.id)
-    .map((f) => {
-      const otherId = f.a === req.user.id ? f.b : f.a;
-      return publicUser(findUser(db, otherId));
-    })
-    .filter(Boolean);
-  res.json({ friends });
-});
-
-app.get("/api/close-friends/requests", auth, (req, res) => {
-  const db = loadDb();
-  const all = Object.values(db.closeFriendRequests);
-  const sent = all.filter((r) => r.from === req.user.id && r.status === "pending");
-  const received = all.filter((r) => r.to === req.user.id && r.status === "pending");
-  res.json({ sent, received });
-});
-
-app.post("/api/close-friends/request", auth, (req, res) => {
-  const target = findUser(loadDb(), req.body?.targetId);
-  if (!target) return res.status(404).json({ error: "Not found" });
-  if (target.id === req.user.id) return res.status(400).json({ error: "Cannot friend self" });
-  withDb((db) => {
-    const id = rid("cfr");
-    db.closeFriendRequests[id] = {
-      id,
-      from: req.user.id,
-      to: target.id,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    };
-    const nid = rid("notif");
-    db.notifications[nid] = {
-      id: nid,
-      user_id: target.id,
-      type: "friend_request",
-      read: false,
-      created_at: new Date().toISOString(),
-      data: JSON.stringify({ requestId: id, fromUid: req.user.id, fromName: req.user.display_name, fromUsername: req.user.username }),
-    };
-    res.json({ ok: true, requestId: id });
-  });
-});
-
-app.post("/api/close-friends/respond", auth, (req, res) => {
-  const { requestId, accept } = req.body || {};
-  withDb((db) => {
-    const r = db.closeFriendRequests[requestId];
-    if (!r || r.to !== req.user.id) return res.status(404).json({ error: "Not found" });
-    r.status = accept ? "accepted" : "declined";
-    if (accept) {
-      const fid = rid("cf");
-      db.closeFriends[fid] = { id: fid, a: r.from, b: r.to, createdAt: new Date().toISOString() };
-    }
-    res.json({ ok: true });
-  });
-});
-
-app.delete("/api/close-friends/:friendId", auth, (req, res) => {
-  withDb((db) => {
-    const friend = findUser(db, req.params.friendId);
-    if (!friend) return res.status(404).json({ error: "Not found" });
-    for (const [id, f] of Object.entries(db.closeFriends)) {
-      if (
-        (f.a === req.user.id && f.b === friend.id) ||
-        (f.b === req.user.id && f.a === friend.id)
-      ) {
-        delete db.closeFriends[id];
-      }
-    }
-    res.json({ ok: true });
-  });
-});
-
-// ── Referrals ────────────────────────────────────────────────────────────────
-app.get("/api/referrals/code/:code", (req, res) => {
-  const db = loadDb();
-  const inviter = Object.values(db.users).find(
-    (u) => (u.invite_code || "").toUpperCase() === String(req.params.code).toUpperCase()
-  );
-  res.json({ inviter: inviter ? publicUser(inviter) : null });
-});
-
-app.post("/api/referrals/process", auth, (req, res) => {
-  const { inviterId } = req.body || {};
-  withDb((db) => {
-    const inviter = findUser(db, inviterId);
-    if (!inviter || inviter.id === req.user.id) return res.json({ ok: false });
-    inviter.invites_count = (inviter.invites_count || 0) + 1;
-    inviter.xp = (inviter.xp || 0) + 50;
-    inviter.level = calcLevel(inviter.xp);
-    res.json({ ok: true, xpBonus: 50, milestoneBonus: 0 });
-  });
+  res.json({ leaderboard: result.rows.map(publicUser) });
 });
 
 // ── Economy ──────────────────────────────────────────────────────────────────
-app.post("/api/economy/xp", auth, (req, res) => {
-  const amount = Number(req.body?.amount || 0);
-  withDb((db) => {
-    const u = db.users[req.user.id];
-    u.xp = Math.max(0, (u.xp || 0) + amount);
-    u.level = calcLevel(u.xp);
-    res.json({ ok: true, xpGained: amount, xp: u.xp, level: u.level });
-  });
-});
+app.post('/api/economy/xp', authenticate, async (req, res) => {
+  const { amount, reason } = req.body || {};
+  const xpAmount = Number(amount || 0);
 
-app.get("/api/economy/freeze-tokens", auth, (req, res) => {
-  const db = loadDb();
-  const tokens = (db.freezeTokens[req.user.id] || []).filter((t) => !t.used);
-  res.json({ tokens });
-});
-
-app.post("/api/economy/buy-freeze", auth, (req, res) => {
-  withDb((db) => {
-    const u = db.users[req.user.id];
-    const cost = 100;
-    if ((u.xp || 0) < cost) return res.status(400).json({ error: "Not enough XP" });
-    u.xp -= cost;
-    u.level = calcLevel(u.xp);
-    if (!db.freezeTokens[u.id]) db.freezeTokens[u.id] = [];
-    const t = { id: rid("ft"), used: false, boughtAt: new Date().toISOString() };
-    db.freezeTokens[u.id].push(t);
-    res.json({ ok: true, token: t });
-  });
-});
-
-app.post("/api/economy/use-freeze", auth, (req, res) => {
-  withDb((db) => {
-    const list = db.freezeTokens[req.user.id] || [];
-    const t = list.find((x) => !x.used);
-    if (!t) return res.status(400).json({ error: "No tokens" });
-    t.used = true;
-    res.json({ ok: true });
-  });
-});
-
-// ── Auto-Kick + Auto-Replacement System ──────────────────────────────────────
-
-// Helper: Check if user has submitted proof today for a specific room
-function hasProofToday(db, userId, roomId) {
-  const today = new Date().toISOString().slice(0, 10);
-  return Object.values(db.proofs).some(
-    (p) => p.user_id === userId && 
-    (p.room_id === roomId || !p.room_id) && 
-    p.date_key === today &&
-    p.ai_verdict === "approved"
-  );
-}
-
-// Helper: Get days since last proof for a user in a room
-function daysSinceLastProof(db, userId, roomId) {
-  const roomProofs = Object.values(db.proofs).filter(
-    (p) => p.user_id === userId && 
-    (p.room_id === roomId || !p.room_id) &&
-    p.ai_verdict === "approved"
-  );
-  if (roomProofs.length === 0) return 999;
-  
-  roomProofs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  const lastProof = roomProofs[0];
-  const lastDate = lastProof.date_key;
-  const today = new Date().toISOString().slice(0, 10);
-  
-  const diff = new Date(today) - new Date(lastDate);
-  return Math.floor(diff / (1000 * 60 * 60 * 24));
-}
-
-// Helper: Find eligible replacement for a room
-function findReplacement(db, room) {
-  const threshold = db.config?.inactivityThresholdDays || 3;
-  const maxRoomSize = db.config?.maxRoomSize || 8;
-  
-  // Get current room members for comparison
-  const currentMembers = roomMembers(db, room.id);
-  const currentMemberIds = new Set(currentMembers.map(m => m.userId));
-  
-  // Find users in waiting queue who match room criteria
-  const candidates = Object.values(db.waitingQueue).filter(w => {
-    const user = db.users[w.userId];
-    if (!user) return false;
-    if (currentMemberIds.has(user.id)) return false;
-    if (user.is_banned || user.is_suspended) return false;
-    
-    // Check if user is already in an active room (unless premium)
-    const hasActiveRoom = Object.values(db.roomMembers).some(
-      m => m.userId === user.id && m.status === "active"
-    );
-    if (hasActiveRoom && !user.premium) return false;
-    
-    // Match niche/topic
-    if (room.niche && room.niche !== "general" && user.niche !== room.niche) {
-      return false;
-    }
-    
-    // Match age range
-    if (room.age_range && user.age_range && user.age_range !== room.age_range) {
-      return false;
-    }
-    
-    return true;
-  });
-  
-  if (candidates.length === 0) return null;
-  
-  // Prioritize: same topic, closest age match, longest waiting
-  candidates.sort((a, b) => {
-    const userA = db.users[a.userId];
-    const userB = db.users[b.userId];
-    
-    // Priority 1: Same topic/niche
-    const topicMatchA = room.niche && userA.niche === room.niche;
-    const topicMatchB = room.niche && userB.niche === room.niche;
-    if (topicMatchA && !topicMatchB) return -1;
-    if (!topicMatchA && topicMatchB) return 1;
-    
-    // Priority 2: Longest time waiting
-    const waitTimeA = new Date() - new Date(a.joinedAt);
-    const waitTimeB = new Date() - new Date(b.joinedAt);
-    return waitTimeB - waitTimeA;
-  });
-  
-  return candidates[0];
-}
-
-// Helper: Check and process inactive members for all rooms
-function processInactiveMembers(db) {
-  const threshold = db.config?.inactivityThresholdDays || 3;
-  const now = new Date().toISOString();
-  let kickedCount = 0;
-  
-  // Update last activity check time
-  if (!db.config) db.config = {};
-  db.config.lastActivityCheck = now;
-  
-  // Check each room
-  for (const room of Object.values(db.rooms)) {
-    const members = roomMembers(db, room.id);
-    
-    for (const member of members) {
-      const user = db.users[member.userId];
-      if (!user) continue;
-      
-      const daysSince = daysSinceLastProof(db, user.id, room.id);
-      
-      // Check if member is inactive
-      if (daysSince >= threshold) {
-        // Mark member as inactive and remove from room
-        member.status = "inactive_kicked";
-        member.inactiveSince = now;
-        member.inactiveReason = `No proof for ${daysSince} days`;
-        
-        // Update user status
-        user.kicked_from_room = true;
-        user.kick_status = "inactive";
-        user.burned_at = now;
-        user.xp = Math.max(0, (user.xp || 0) - 20);
-        
-        // Create notification for kicked user
-        const nid = rid("notif");
-        db.notifications[nid] = {
-          id: nid,
-          user_id: user.id,
-          type: "kick",
-          read: false,
-          created_at: now,
-          data: JSON.stringify({
-            reason: `Inactive for ${daysSince} days`,
-            roomId: room.id,
-            roomName: room.name,
-          }),
-        };
-        
-        kickedCount++;
-        
-        // Queue replacement for this room only if it still has members
-        const remainingMembers = roomMembers(db, room.id);
-        const minRoomSize = db.config?.minRoomSize || 3;
-        if (remainingMembers.length > 0 && remainingMembers.length < minRoomSize) {
-          queueReplacement(db, room.id);
-        }
-      }
-    }
-  }
-  
-  return kickedCount;
-}
-
-// Helper: Queue a replacement for a room
-function queueReplacement(db, roomId) {
-  const existing = Object.values(db.replacementQueue).find(r => r.roomId === roomId && r.status === "pending");
-  if (existing) return; // Already queued
-  
-  const id = rid("rep");
-  db.replacementQueue[id] = {
-    id,
-    roomId,
-    status: "pending",
-    createdAt: new Date().toISOString(),
-    attempts: 0,
-  };
-}
-
-// Helper: Process replacement queue
-function processReplacementQueue(db) {
-  const processed = [];
-  const assignedUserIds = new Set(); // Track users assigned in this batch to prevent duplicates
-  
-  for (const [id, replacement] of Object.entries(db.replacementQueue)) {
-    if (replacement.status !== "pending") continue;
-    
-    const room = db.rooms[replacement.roomId];
-    if (!room) {
-      replacement.status = "failed";
-      replacement.error = "Room not found";
-      continue;
-    }
-    
-    const currentMembers = roomMembers(db, room.id);
-    const maxRoomSize = db.config?.maxRoomSize || 8;
-    
-    // Check if room still needs replacement
-    if (currentMembers.length >= maxRoomSize) {
-      replacement.status = "completed";
-      replacement.reason = "Room full";
-      continue;
-    }
-    
-    // Find replacement candidate
-    const candidate = findReplacement(db, room);
-    if (!candidate) {
-      replacement.attempts = (replacement.attempts || 0) + 1;
-      // Retry later if under max attempts
-      if (replacement.attempts >= 10) {
-        replacement.status = "failed";
-        replacement.error = "No eligible candidates found after multiple attempts";
-      }
-      continue;
-    }
-    
-    // Check if candidate was already assigned in this batch (race condition protection)
-    if (assignedUserIds.has(candidate.userId)) {
-      replacement.attempts = (replacement.attempts || 0) + 1;
-      continue;
-    }
-    
-    // Add candidate to room (atomic operation)
-    const user = db.users[candidate.userId];
-    if (!user) {
-      replacement.status = "failed";
-      replacement.error = "Candidate user not found";
-      continue;
-    }
-    
-    // Double-check user is not already in this room
-    const alreadyInRoom = currentMembers.some(m => m.userId === user.id);
-    if (alreadyInRoom) {
-      replacement.status = "completed";
-      replacement.reason = "User already in room";
-      continue;
-    }
-    
-    // Remove from waiting queue
-    delete db.waitingQueue[candidate.id];
-    
-    // Leave any other active room first
-    for (const m of Object.values(db.roomMembers)) {
-      if (m.userId === user.id && m.status === "active") {
-        m.status = "left";
-      }
-    }
-    
-    // Re-check room capacity after potential concurrent changes
-    const updatedMembers = roomMembers(db, room.id);
-    if (updatedMembers.length >= maxRoomSize) {
-      replacement.status = "completed";
-      replacement.reason = "Room became full during processing";
-      // Put user back in waiting queue
-      const newWaitId = rid("wait");
-      db.waitingQueue[newWaitId] = {
-        id: newWaitId,
-        userId: user.id,
-        niche: candidate.niche || user.niche || "",
-        ageRange: candidate.ageRange || user.age_range || "",
-        joinedAt: new Date().toISOString(),
-      };
-      continue;
-    }
-    
-    // Add to room
-    const mid = rid("rm");
-    db.roomMembers[mid] = {
-      id: mid,
-      roomId: room.id,
-      userId: user.id,
-      status: "active",
-      joinedAt: new Date().toISOString(),
-      replacement: true,
-    };
-    
-    // Mark user as assigned to prevent duplicate assignments in this batch
-    assignedUserIds.add(user.id);
-    
-    // Update user
-    user.room_joined_at = new Date().toLocaleDateString("en-US", { 
-      month: "long", day: "numeric", year: "numeric" 
-    });
-    user.joined_rooms = (user.joined_rooms || 0) + 1;
-    
-    // Notify new member
-    const nid1 = rid("notif");
-    db.notifications[nid1] = {
-      id: nid1,
-      user_id: user.id,
-      type: "room_joined",
-      read: false,
-      created_at: new Date().toISOString(),
-      data: JSON.stringify({
-        roomId: room.id,
-        roomName: room.name,
-        message: "You've been matched into a new room!",
-      }),
-    };
-    
-    // Notify existing room members
-    for (const member of currentMembers) {
-      const nid2 = rid("notif");
-      db.notifications[nid2] = {
-        id: nid2,
-        user_id: member.userId,
-        type: "new_member",
-        read: false,
-        created_at: new Date().toISOString(),
-        data: JSON.stringify({
-          roomId: room.id,
-          roomName: room.name,
-          newMemberName: user.display_name,
-          message: `${user.display_name} joined your room`,
-        }),
-      };
-    }
-    
-    replacement.status = "completed";
-    replacement.candidateId = user.id;
-    processed.push({ roomId: room.id, userId: user.id });
-  }
-  
-  return processed;
-}
-
-// API: Add user to waiting queue
-app.post("/api/waiting-queue/join", auth, (req, res) => {
-  const { niche, ageRange } = req.body || {};
-  withDb((db) => {
-    // Remove any existing waiting entry
-    for (const [id, w] of Object.entries(db.waitingQueue)) {
-      if (w.userId === req.user.id) {
-        delete db.waitingQueue[id];
-      }
-    }
-    
-    const id = rid("wait");
-    db.waitingQueue[id] = {
-      id,
-      userId: req.user.id,
-      niche: niche || req.user.niche || "",
-      ageRange: ageRange || req.user.age_range || "",
-      joinedAt: new Date().toISOString(),
-    };
-    
-    // Try to find immediate match
-    for (const room of Object.values(db.rooms)) {
-      const members = roomMembers(db, room.id);
-      const maxRoomSize = db.config?.maxRoomSize || 8;
-      
-      if (members.length < maxRoomSize) {
-        const candidate = findReplacement(db, room);
-        if (candidate && candidate.userId === req.user.id) {
-          // Immediate match found
-          queueReplacement(db, room.id);
-          const result = processReplacementQueue(db);
-          if (result.length > 0) {
-            return res.json({ 
-              ok: true, 
-              queued: false, 
-              matched: true, 
-              roomId: room.id 
-            });
-          }
-        }
-      }
-    }
-    
-    res.json({ ok: true, queued: true, waitingId: id });
-  });
-});
-
-// API: Remove user from waiting queue
-app.delete("/api/waiting-queue/leave", auth, (req, res) => {
-  withDb((db) => {
-    for (const [id, w] of Object.entries(db.waitingQueue)) {
-      if (w.userId === req.user.id) {
-        delete db.waitingQueue[id];
-      }
-    }
-    res.json({ ok: true });
-  });
-});
-
-// API: Get waiting queue status
-app.get("/api/waiting-queue/status", auth, (req, res) => {
-  const db = loadDb();
-  const entry = Object.values(db.waitingQueue).find(w => w.userId === req.user.id);
-  res.json({ 
-    inQueue: !!entry, 
-    entry: entry || null,
-    queueSize: Object.keys(db.waitingQueue).length 
-  });
-});
-
-// API: Manual trigger for activity check (admin only)
-app.post("/api/admin/check-activity", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  
-  const result = withDb((db) => {
-    const kickedCount = processInactiveMembers(db);
-    const replacements = processReplacementQueue(db);
-    return { kickedCount, replacementsProcessed: replacements.length };
-  });
-  
-  res.json(result);
-});
-
-// API: Get system config (admin only)
-app.get("/api/admin/config", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  
-  const db = loadDb();
-  res.json({ config: db.config || {} });
-});
-
-// API: Update system config (admin only)
-app.patch("/api/admin/config", auth, (req, res) => {
-  if (!req.user.is_admin) return res.status(403).json({ error: "Forbidden" });
-  
-  const { inactivityThresholdDays, minRoomSize, maxRoomSize } = req.body || {};
-  
-  withDb((db) => {
-    if (!db.config) db.config = {};
-    if (inactivityThresholdDays !== undefined) db.config.inactivityThresholdDays = inactivityThresholdDays;
-    if (minRoomSize !== undefined) db.config.minRoomSize = minRoomSize;
-    if (maxRoomSize !== undefined) db.config.maxRoomSize = maxRoomSize;
-    res.json({ config: db.config });
-  });
-});
-
-// Schedule periodic activity check (every hour)
-setInterval(() => {
   try {
-    withDb((db) => {
-      processInactiveMembers(db);
-      processReplacementQueue(db);
+    await transaction(async (client) => {
+      await updateUserXP(client, req.user.id, xpAmount, reason || 'manual');
     });
-  } catch (error) {
-    console.error("Activity check error:", error);
+
+    const userResult = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const user = userResult.rows[0];
+
+    res.json({ ok: true, xpGained: xpAmount, xp: user.xp, level: user.level });
+  } catch (e) {
+    console.error('XP update error:', e);
+    res.status(500).json({ error: 'XP update failed' });
   }
-}, 60 * 60 * 1000); // 1 hour
+});
 
 // ── Images ───────────────────────────────────────────────────────────────────
-app.post("/api/images/upload", auth, upload.single("image"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file" });
-  const url = `/uploads/${encodeURIComponent(req.file.filename)}`;
-  res.json({ url });
+app.post('/api/images/upload', authenticate, upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file' });
+  }
+
+  try {
+    const key = storage.generateKey(req.file.originalname);
+    const url = await storage.uploadFile(req.file, key);
+    res.json({ url });
+  } catch (e) {
+    console.error('Image upload error:', e);
+    res.status(500).json({ error: 'Image upload failed' });
+  }
 });
 
-app.get("/api/health", async (_req, res) => {
-  const supabase = isSupabaseConfigured
-    ? await verifySupabaseAdmin().catch(() => ({ ok: false, reason: "verify_failed" }))
-    : { ok: false, reason: "not_configured" };
+// ── Waiting Queue ─────────────────────────────────────────────────────────────
+app.post('/api/waiting-queue/join', authenticate, async (req, res) => {
+  const { niche, ageRange } = req.body || {};
+
+  try {
+    await transaction(async (client) => {
+      // Remove existing entry
+      await client.query('DELETE FROM waiting_queue WHERE user_id = $1', [req.user.id]);
+
+      const id = rid('wait');
+      await client.query(
+        `INSERT INTO waiting_queue (id, user_id, niche, age_range, joined_at)
+         VALUES ($1, $2, $3, $4, NOW())`,
+        [id, req.user.id, niche || req.user.niche || '', ageRange || req.user.age_range || '']
+      );
+
+      // Try immediate match
+      const availableRooms = await client.query(
+        `SELECT r.*, 
+         (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id AND rm.status = 'active') as member_count
+         FROM rooms r 
+         WHERE r.status = 'active' 
+         AND r.niche = $1 
+         AND (r.age_range IS NULL OR r.age_range = $2)
+         ORDER BY r.created_at ASC
+         LIMIT 5`,
+        [niche || req.user.niche || 'general', ageRange || req.user.age_range || '']
+      );
+
+      for (const room of availableRooms.rows) {
+        if (parseInt(room.member_count) < (room.max_members || 8)) {
+          // Join this room immediately
+          await client.query(
+            `UPDATE room_members SET status = 'left', left_at = NOW() 
+             WHERE user_id = $1 AND status = 'active'`,
+            [req.user.id]
+          );
+
+          const memberId = rid('rm');
+          await client.query(
+            `INSERT INTO room_members (id, room_id, user_id, status, joined_at)
+             VALUES ($1, $2, $3, 'active', NOW())`,
+            [memberId, room.id, req.user.id]
+          );
+
+          await client.query(
+            `UPDATE users SET room_joined_at = NOW(), joined_rooms = joined_rooms + 1 WHERE id = $1`,
+            [req.user.id]
+          );
+
+          await client.query('DELETE FROM waiting_queue WHERE id = $1', [id]);
+
+          return res.json({ ok: true, queued: false, matched: true, roomId: room.id });
+        }
+      }
+    });
+
+    res.json({ ok: true, queued: true });
+  } catch (e) {
+    console.error('Waiting queue error:', e);
+    res.status(500).json({ error: 'Waiting queue failed' });
+  }
+});
+
+app.delete('/api/waiting-queue/leave', authenticate, async (req, res) => {
+  await query('DELETE FROM waiting_queue WHERE user_id = $1', [req.user.id]);
+  res.json({ ok: true });
+});
+
+app.get('/api/waiting-queue/status', authenticate, async (req, res) => {
+  const result = await query('SELECT * FROM waiting_queue WHERE user_id = $1', [req.user.id]);
+  const queueSize = await query('SELECT COUNT(*) as count FROM waiting_queue');
+  
   res.json({
-    ok: true,
-    supabase: { configured: isSupabaseConfigured, connected: !!supabase.ok },
+    inQueue: result.rows.length > 0,
+    entry: result.rows[0] || null,
+    queueSize: parseInt(queueSize.rows[0].count) || 0
   });
 });
+
+// ── Referrals ───────────────────────────────────────────────────────────────
+app.get('/api/referrals/code/:code', async (req, res) => {
+  const result = await query(
+    "SELECT * FROM users WHERE UPPER(invite_code) = UPPER($1)",
+    [req.params.code]
+  );
+  
+  if (result.rows.length === 0) {
+    return res.json({ inviter: null });
+  }
+
+  res.json({ inviter: publicUser(result.rows[0]) });
+});
+
+app.post('/api/referrals/process', authenticate, async (req, res) => {
+  const { inviterId } = req.body || {};
+
+  try {
+    await transaction(async (client) => {
+      if (inviterId === req.user.id) {
+        return res.json({ ok: false });
+      }
+
+      await client.query(
+        `UPDATE users SET invites_count = invites_count + 1 WHERE id = $1`,
+        [inviterId]
+      );
+
+      await updateUserXP(client, inviterId, 50, 'referral');
+    });
+
+    res.json({ ok: true, xpBonus: 50, milestoneBonus: 0 });
+  } catch (e) {
+    console.error('Referral processing error:', e);
+    res.status(500).json({ error: 'Referral processing failed' });
+  }
+});
+
+// ── Follows ─────────────────────────────────────────────────────────────────
+app.post('/api/users/follow/:targetId', authenticate, async (req, res) => {
+  const targetId = req.params.targetId;
+
+  try {
+    await transaction(async (client) => {
+      if (targetId === req.user.id) {
+        return res.status(400).json({ error: 'Cannot follow self' });
+      }
+
+      await client.query(
+        `INSERT INTO follows (from_user_id, to_user_id, at) VALUES ($1, $2, NOW())
+         ON CONFLICT (from_user_id, to_user_id) DO NOTHING`,
+        [req.user.id, targetId]
+      );
+
+      // Update user's following list
+      const targetResult = await client.query('SELECT * FROM users WHERE id = $1', [targetId]);
+      const target = targetResult.rows[0];
+      
+      const init = (target.username || '?').slice(0, 2).toUpperCase();
+      await client.query(
+        `UPDATE users SET following = array_append(following, $1) WHERE id = $2 AND NOT ($1 = ANY(following))`,
+        [init, req.user.id]
+      );
+
+      // Create notification
+      const notifId = rid('notif');
+      await client.query(
+        `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+         VALUES ($1, $2, 'follow', false, NOW(), $3)`,
+        [notifId, targetId, JSON.stringify({
+          fromUid: req.user.id,
+          fromName: req.user.display_name,
+          fromUsername: req.user.username
+        })]
+      );
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Follow error:', e);
+    res.status(500).json({ error: 'Follow failed' });
+  }
+});
+
+app.delete('/api/users/follow/:targetId', authenticate, async (req, res) => {
+  const targetId = req.params.targetId;
+
+  try {
+    await query('DELETE FROM follows WHERE from_user_id = $1 AND to_user_id = $2', [req.user.id, targetId]);
+    
+    const targetResult = await client.query('SELECT * FROM users WHERE id = $1', [targetId]);
+    const target = targetResult.rows[0];
+    const init = (target.username || '?').slice(0, 2).toUpperCase();
+    
+    await query(
+      `UPDATE users SET following = array_remove(following, $1) WHERE id = $2`,
+      [init, req.user.id]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Unfollow error:', e);
+    res.status(500).json({ error: 'Unfollow failed' });
+  }
+});
+
+// ── Freeze Tokens ─────────────────────────────────────────────────────────────
+app.get('/api/economy/freeze-tokens', authenticate, async (req, res) => {
+  const result = await query(
+    `SELECT * FROM freeze_tokens WHERE user_id = $1 AND used = false ORDER BY bought_at DESC`,
+    [req.user.id]
+  );
+  res.json({ tokens: result.rows });
+});
+
+app.post('/api/economy/buy-freeze', authenticate, async (req, res) => {
+  try {
+    await transaction(async (client) => {
+      const userResult = await client.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+      const user = userResult.rows[0];
+      const cost = 100;
+
+      if ((user.xp || 0) < cost) {
+        throw Object.assign(new Error('Not enough XP'), { status: 400 });
+      }
+
+      await updateUserXP(client, req.user.id, -cost, 'freeze_token');
+
+      const tokenId = rid('ft');
+      await client.query(
+        `INSERT INTO freeze_tokens (id, user_id, used, bought_at) VALUES ($1, $2, false, NOW())`,
+        [tokenId, req.user.id]
+      );
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post('/api/economy/use-freeze', authenticate, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM freeze_tokens WHERE user_id = $1 AND used = false ORDER BY bought_at ASC LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'No tokens available' });
+    }
+
+    await query(
+      `UPDATE freeze_tokens SET used = true WHERE id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Freeze token error:', e);
+    res.status(500).json({ error: 'Freeze token usage failed' });
+  }
+});
+
+// ── Admin Functions ───────────────────────────────────────────────────────────
+app.post('/api/admin/check-activity', authenticate, requireAdmin, async (req, res) => {
+  // This would implement the activity check logic from the original system
+  // For now, return a placeholder response
+  res.json({ 
+    ok: true, 
+    kickedCount: 0, 
+    replacementsProcessed: 0,
+    message: 'Activity check not yet implemented in PostgreSQL version'
+  });
+});
+
+app.get('/api/admin/config', authenticate, requireAdmin, async (req, res) => {
+  const result = await query("SELECT value FROM config WHERE key = 'system'");
+  res.json({ config: result.rows[0]?.value || {} });
+});
+
+app.patch('/api/admin/config', authenticate, requireAdmin, async (req, res) => {
+  const { inactivityThresholdDays, minRoomSize, maxRoomSize } = req.body || {};
+
+  try {
+    const currentResult = await query("SELECT value FROM config WHERE key = 'system'");
+    const currentConfig = currentResult.rows[0]?.value || {};
+    
+    const newConfig = {
+      ...currentConfig,
+      ...(inactivityThresholdDays !== undefined && { inactivityThresholdDays }),
+      ...(minRoomSize !== undefined && { minRoomSize }),
+      ...(maxRoomSize !== undefined && { maxRoomSize }),
+    };
+
+    await query(
+      `UPDATE config SET value = $1 WHERE key = 'system'`,
+      [JSON.stringify(newConfig)]
+    );
+
+    res.json({ config: newConfig });
+  } catch (e) {
+    console.error('Config update error:', e);
+    res.status(500).json({ error: 'Config update failed' });
+  }
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  if (err.message === 'Database not configured') {
+    return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
+  }
+
+  console.error('Error:', err);
+
+  if (err.code === '23505') { // Unique violation
+    return res.status(409).json({ error: 'Resource already exists' });
+  }
+
+  if (err.code === '23503') { // Foreign key violation
+    return res.status(400).json({ error: 'Invalid reference to related resource' });
+  }
+
+  if (err.code === '23502') { // Not null violation
+    return res.status(400).json({ error: 'Missing required field' });
+  }
+
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Serve static files in production (must be after API routes)
+if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../dist')));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../dist/index.html'));
+  });
+}
+
+// Start server
+async function start() {
+  try {
+    await runMigrations();
+    startCleanupInterval();
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Capitol API listening on http://0.0.0.0:${PORT}`);
+      console.log('Database: PostgreSQL (if configured)');
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  await shutdown();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, shutting down gracefully');
+  await shutdown();
+  process.exit(0);
+});
+
+// Only start server if not running in Vercel
+if (!process.env.VERCEL) {
+  start();
+}
 
 export default app;
-
-function startLocal() {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Capitol API listening on http://0.0.0.0:${PORT}`);
-    if (isSupabaseConfigured) {
-      verifySupabaseAdmin()
-        .then((r) => console.log(`Supabase: ${r.ok ? "connected" : "unavailable"}`))
-        .catch(() => console.log("Supabase: unavailable"));
-    } else {
-      console.log("Supabase: not configured");
-    }
-  });
-}
-
-// On Vercel the platform invokes the exported app; locally we listen.
-if (!process.env.VERCEL) {
-  startLocal();
-}

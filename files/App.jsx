@@ -3,7 +3,7 @@ import {
   _getUsersStore, _saveUsersStore,
   fbSignup, fbLogin, fbLogout, fbDeleteAccount, fbCheckUserId,
   fbGetUser, fbGetAllUsers, fbUpdateUser,
-  fbGetRooms, fbCreateRoom,
+  fbGetRooms, fbGetRoomById, fbCreateRoom,
   fbGetJoinCooldown, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbSubmitProof, fbGetProofs,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
@@ -601,10 +601,11 @@ function calcRank(xp=0){for(let i=RANK_TIERS.length-1;i>=0;i--){if((xp||0)>=RANK
 function xpForLevel(level=1){return((Math.max(1,Math.floor(level||1))-1)*50);}
 // calcLevel imported from api.jsx (uses server's 100*level^1.4 curve)
 // ── Persistent XP localStorage helpers (non-volatile) ──────────────────────
+// DEPRECATED: XP is now persisted via backend only
 function _xpKey(uid){return "kd_xp_v1_"+uid;}
 function _animKey(name){return "kd_anim_v1_"+name;}
 function loadPersistedXP(uid){const v=parseInt(lsGet(_xpKey(uid)),10);return isNaN(v)?null:v;}
-function savePersistedXP(uid,xp){lsSet(_xpKey(uid),xp);}
+function savePersistedXP(uid,xp){lsSet(_xpKey(uid),xp);} // Legacy - no longer used
 function markAnimationPlayed(name){lsSet(_animKey(name),1);}
 function hasAnimationPlayed(name){return!!lsGet(_animKey(name));}
 function calcXPGain(streak=0){return 10+(Math.min(streak,30)*2);}
@@ -3945,17 +3946,18 @@ function KickedScreen({ userState, onFindRoom, profile = {} }) {
   const [cooldownLeft, setCooldownLeft] = useState(null);
 
   useEffect(() => {
-    // 24h cooldown from kick timestamp (stored in userState.kickedAt)
+    // 24h cooldown from kick timestamp (stored in userState.burnedAt or profile.burnedAt)
     function tick() {
-      if (!userState.kickedAt) { setCooldownLeft(0); return; }
-      const elapsed = Date.now() - new Date(userState.kickedAt).getTime();
+      const kickTimestamp = userState.burnedAt || profile.burnedAt;
+      if (!kickTimestamp) { setCooldownLeft(0); return; }
+      const elapsed = Date.now() - new Date(kickTimestamp).getTime();
       const remaining = Math.max(0, 86400000 - elapsed);
       setCooldownLeft(remaining);
     }
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [userState.kickedAt]);
+  }, [userState.burnedAt, profile.burnedAt]);
 
   const canRejoin = cooldownLeft === 0;
   const h = Math.floor((cooldownLeft || 0) / 3600000);
@@ -3963,22 +3965,38 @@ function KickedScreen({ userState, onFindRoom, profile = {} }) {
   const s = Math.floor(((cooldownLeft || 0) % 60000) / 1000);
   const pad = n => String(n).padStart(2, "0");
 
+  // Determine kick reason from userState.kickStatus
+  const getKickReason = () => {
+    switch (userState.kickStatus) {
+      case "inactive":
+        return "Inactive for 3+ days (no proof submitted)";
+      case "kicked":
+        return "Removed by room members";
+      case "invalid_proof":
+        return "Invalid or missing proof";
+      default:
+        return "3 consecutive missed days";
+    }
+  };
+
+  const kickReason = getKickReason();
+
   return (
     <div style={{ maxWidth: 600, margin: "60px 0", padding: "0 28px", textAlign: "left" }}>
       <div style={{display:"flex",justifyContent:"center",marginBottom:12}}><KDSkull size={64} animate={true}/></div>
-      <div style={{ fontWeight: 700, fontSize: 24, color: T.text, marginBottom: 6 }}>You were removed</div>
+      <div style={{ fontWeight: 700, fontSize: 24, color: T.text, marginBottom: 6 }}>You were removed from your room</div>
       <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 24, lineHeight: 1.6 }}>
-        You missed 3 consecutive days and were auto-kicked from your room.<br />
-        Your streak has been reset.
+        {kickReason}.<br />
+        Your streak has been reset to 0.
       </div>
 
       {/* Kick log entry */}
       <div style={{ background: T.errorBg, border: `1px solid ${T.errorBorder}`, borderRadius: 12, padding: "14px 18px", marginBottom: 24, textAlign: "left" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: T.errorText, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>{Icon.x} Kick record</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: T.errorText, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>{Icon.x} Removal record</div>
         {[
-          ["Member",  profile.displayName],
-          ["Reason",  "3 consecutive missed days"],
-          ["Date",    new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })],
+          ["Member",  profile.displayName || "You"],
+          ["Reason",  kickReason],
+          ["Date",    new Date(userState.burnedAt || profile.burnedAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })],
           ["Streak",  "Reset to 0"],
         ].map(([l, v]) => (
           <div key={l} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: `1px solid ${T.errorBorder}`, fontSize: 13, gap: 8 }}>
@@ -3998,7 +4016,7 @@ function KickedScreen({ userState, onFindRoom, profile = {} }) {
       ) : (
         <div style={{ background: T.successBg, border: `1px solid ${T.successBorder}`, borderRadius: 12, padding: "14px 18px", marginBottom: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 500, color: T.successText, display:"flex", alignItems:"center", gap:5 }}><KDCheck size={16}/>Cooldown over — you can rejoin</div>
-          <div style={{ fontSize: 12, color: T.successText, marginTop: 4 }}>Go through the AI interview again to prove your commitment.</div>
+          <div style={{ fontSize: 12, color: T.successText, marginTop: 4 }}>Find a new room to continue your accountability journey.</div>
         </div>
       )}
 
@@ -10888,10 +10906,29 @@ function ComebackBanner({ userState, onRejoin, onFindRoom }) {
   const { T } = useTheme();
   const cb = getComebackState(userState);
   if (!cb.eligible) return null;
+  
+  // Show specific reason based on kick_status
+  const getKickMessage = (status) => {
+    switch (status) {
+      case "inactive":
+        return "You were removed due to inactivity. Submit daily proofs to stay in your room.";
+      case "kicked":
+        return "You were removed from your room. Your roommates voted to remove you.";
+      case "warned":
+        return "Your membership is at risk. Submit a proof today to stay in your room.";
+      case "flagged":
+        return "You missed a day. Submit proof to avoid being removed.";
+      default:
+        return cb.message;
+    }
+  };
+  
+  const message = getKickMessage(userState.kickStatus);
+  
   return (
     <div style={{ background: "#0a0000", border: "2px solid #dc2626", borderRadius: 10, padding: "14px 18px", marginBottom: 14 }}>
       <div style={{ fontWeight: 700, fontSize: 14, color: "#ef4444", marginBottom: 6, display:"flex", alignItems:"center", gap:5 }}><KDSkull size={18}/>You were kicked</div>
-      <div style={{ fontSize: 13, color: T.errorText, marginBottom: 12 }}>{cb.message}</div>
+      <div style={{ fontSize: 13, color: T.errorText, marginBottom: 12 }}>{message}</div>
       <div style={{ display: "flex", gap: 8 }}>
         <Btn size="sm" variant="danger" onClick={onRejoin}>Pay {cb.xpPenalty} XP · Rejoin now</Btn>
         <Btn size="sm" variant="ghost" onClick={onFindRoom}>Find new room</Btn>
@@ -14221,8 +14258,12 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
       const result = await fbProcessReferral(inviter.uid, uid).catch(() => null);
       if (result && result.ok) {
         var joinBonus = 20;
-        manualSet(function(prev) { return Object.assign({}, prev, { xp: (prev.xp || 0) + joinBonus }); });
-        if (uid) { savePersistedXP(uid, (userState.xp || 0) + joinBonus); }
+        const currentXP = userState.xp ?? 0;
+        const newXP = currentXP + joinBonus;
+        manualSet(function(prev) { return Object.assign({}, prev, { xp: newXP }); });
+        if (uid) {
+          await fbUpdateUser(uid, { xp: newXP }).catch(() => {});
+        }
         var msg = " +" + joinBonus + " XP referral bonus for you! Also awarded +" + result.xpBonus + " XP to " + (inviter.displayName || inviter.userId) + ".";
         if (result.milestoneBonus > 0) { msg += "+" + result.milestoneBonus + " XP milestone bonus!"; }
         showToast(msg, "success");
@@ -14236,9 +14277,11 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   // ── Instant comeback rejoin ───────────────────────────────────────────────────
   async function handleComebackRejoin() {
     const penalty = 20;
-    if ((userState.xp ?? 0) < penalty) { showToast("Not enough XP for instant rejoin", "error"); return; }
-    manualSet(prev => ({ ...prev, xp: prev.xp - penalty, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }));
-    if (uid) await fbUpdateUser(uid, { xp: (userState.xp ?? 0) - penalty, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }).catch(() => {});
+    const currentXP = userState.xp ?? 0;
+    if (currentXP < penalty) { showToast("Not enough XP for instant rejoin", "error"); return; }
+    const newXP = currentXP - penalty;
+    manualSet(prev => ({ ...prev, xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }));
+    if (uid) await fbUpdateUser(uid, { xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }).catch(() => {});
     showToast(`-${penalty} XP paid. You can rejoin a room now.`, "success");
   }
 
@@ -14253,9 +14296,11 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   // ── Entry fee payment → Firestore ─────────────────────────────────────────────
   async function handlePayEntryFee(room, onSuccess) {
     if (!room?.entryFee || room.entryFee === 0) { onSuccess(); return; }
-    if ((userState.xp ?? 0) < room.entryFee) { showToast("Not enough XP for entry fee", "error"); return; }
-    manualSet(prev => ({ ...prev, xp: prev.xp - room.entryFee }));
-    if (uid) await fbUpdateUser(uid, { xp: (userState.xp ?? 0) - room.entryFee }).catch(() => {});
+    const currentXP = userState.xp ?? 0;
+    if (currentXP < room.entryFee) { showToast("Not enough XP for entry fee", "error"); return; }
+    const newXP = currentXP - room.entryFee;
+    manualSet(prev => ({ ...prev, xp: newXP }));
+    if (uid) await fbUpdateUser(uid, { xp: newXP }).catch(() => {});
     showToast(`-${room.entryFee} XP entry fee paid.`, "success");
     onSuccess();
   }
@@ -14424,28 +14469,63 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   // Room join: +5 XP | Badge: +10 XP each | Following someone: +2 XP (once per target)
   // ── Shared XP delta applier: keeps xp + level in sync, persists to backend,
   // and fires the floating "+XP" animation. Used by quests, goals, bets, etc.
-  function applyXPDelta(delta, opts = {}) {
+  async function applyXPDelta(delta, opts = {}) {
     const safe = typeof delta === "number" && !isNaN(delta) ? delta : 0;
     if (!safe) return;
     if (safe > 0) {
       const reason = opts.reason || opts.label || "default";
       if (!checkXPEconomy(uid, reason, opts.onceKey)) return;
     }
-    manualSet(prev => {
-      const newXP = Math.max(0, (prev.xp ?? 0) + safe);
-      return { ...prev, xp: newXP, level: calcLevel(newXP) };
-    });
+    
+    const currentXP = userState.xp ?? 0;
+    const newXP = Math.max(0, currentXP + safe);
+    
+    manualSet(prev => ({
+      ...prev,
+      xp: newXP,
+      level: calcLevel(newXP)
+    }));
+    
+    // Persist to backend as source of truth
+    if (uid) {
+      try {
+        await fbUpdateUser(uid, { xp: newXP });
+      } catch (e) {
+        console.error("Failed to persist XP to backend:", e);
+        manualSet(prev => ({ ...prev, xp: currentXP, level: calcLevel(currentXP) }));
+      }
+    }
+    
     fireXPGain(safe, opts);
   }
 
-  function awardActivityXP(amount, reason) {
+  async function awardActivityXP(amount, reason) {
     const safe = typeof amount === "number" && !isNaN(amount) ? amount : 0;
     if (safe <= 0) return;
     if (!checkXPEconomy(uid, reason)) return;
-    manualSet(prev => {
-      const newXP = (prev.xp ?? 0) + safe;
-      return { ...prev, xp: newXP, level: calcLevel(newXP) };
-    });
+    
+    // Calculate new XP value
+    const currentXP = userState.xp ?? 0;
+    const newXP = currentXP + safe;
+    
+    // Update local state optimistically
+    manualSet(prev => ({
+      ...prev,
+      xp: newXP,
+      level: calcLevel(newXP)
+    }));
+    
+    // Persist to backend as source of truth
+    if (uid) {
+      try {
+        await fbUpdateUser(uid, { xp: newXP });
+      } catch (e) {
+        console.error("Failed to persist XP to backend:", e);
+        // Revert local state on failure
+        manualSet(prev => ({ ...prev, xp: currentXP, level: calcLevel(currentXP) }));
+      }
+    }
+    
     if (reason !== "chat_msg") fireXPGain(safe, { label: activityXPLabel(reason) });
   }
 
@@ -14943,8 +15023,12 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
     const prevRoomId = joinedRoomId;
     setJoinedRoomId(null); setLeaveOpen(false);
     setProfile(prev => ({ ...prev, roomJoinedAt: null }));
+    
+    // Clear kick status when voluntarily leaving
+    manualSet(prev => ({ ...prev, kickedFromRoom: false, kickStatus: "ok" }));
+    
     if (uid && prevRoomId) await fbLeaveRoom(uid, prevRoomId, me.init).catch(() => {});
-    if (uid) await fbUpdateUser(uid, { roomJoinedAt: null }).catch(() => {});
+    if (uid) await fbUpdateUser(uid, { roomJoinedAt: null, kickedFromRoom: false, kickStatus: "ok" }).catch(() => {});
     showToast(`Left ${name}`);
     // ── Prompt session satisfaction vote ─────────────────────────────────────────
     if (roomSnapshot) triggerSessionVote(roomSnapshot);
@@ -14963,7 +15047,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
   async function handleVultureClaim(xpAmount) {
     if (!joinedRoom || profile.vultureClaimed === joinedRoom.id) return;
     const safeAmount = Math.min(Math.max(0, xpAmount || 0), 200);
-    applyXPDelta(safeAmount, { label: "Vulture claim", reason: "vulture" });
+    await applyXPDelta(safeAmount, { label: "Vulture claim", reason: "vulture" });
     setProfile(prev => ({ ...prev, vultureClaimed: joinedRoom.id }));
     if (uid) await fbUpdateUser(uid, { vultureClaimed: joinedRoom.id }).catch(() => {});
     showToast(` +${safeAmount} Vulture XP claimed!`, "success");
