@@ -623,6 +623,17 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
 
       const room = roomResult.rows[0];
 
+      // Check if user is already in this room with active status
+      const currentActiveMember = await client.query(
+        `SELECT * FROM room_members WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
+        [room.id, req.user.id]
+      );
+
+      if (currentActiveMember.rows.length > 0) {
+        // User is already in this room - just return success
+        return res.json({ ok: true, alreadyInRoom: true });
+      }
+
       // Check capacity
       const memberCount = await client.query(
         `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
@@ -640,7 +651,7 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
         [req.user.id]
       );
 
-      // Check if already in this room
+      // Check if user has a previous entry in this room (rejoining)
       const existingMember = await client.query(
         `SELECT * FROM room_members WHERE room_id = $1 AND user_id = $2`,
         [room.id, req.user.id]
@@ -679,16 +690,19 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
 app.post('/api/rooms/:id/leave', authenticate, async (req, res) => {
   try {
     await transaction(async (client) => {
-      await client.query(
+      const result = await client.query(
         `UPDATE room_members SET status = 'left', left_at = NOW() 
-         WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
+         WHERE room_id = $1 AND user_id = $2 AND status = 'active' RETURNING *`,
         [req.params.id, req.user.id]
       );
 
-      await client.query(
-        `UPDATE users SET room_joined_at = NULL WHERE id = $1`,
-        [req.user.id]
-      );
+      // Only clear room_joined_at if the user was actually in this room
+      if (result.rows.length > 0) {
+        await client.query(
+          `UPDATE users SET room_joined_at = NULL WHERE id = $1`,
+          [req.user.id]
+        );
+      }
 
       // Check if room needs replacement
       const memberCount = await client.query(

@@ -9679,6 +9679,8 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
         let createdId = best.id; try { const created = await fbCreateRoom({...best}); if (created?.id) createdId = created.id; } catch {} const staleId = best.id; best = { ...best, id: createdId }; const _rr = _getRoomsStore(); delete _rr[staleId]; _rr[best.id] = { ...best }; _saveRoomsStore(_rr); await fbJoinRoom(userData.uid, best.id, (userData.userId||"?").slice(0,2).toUpperCase()).catch(()=>{});
       }
       _putDoc("roomParticipants", userData.uid+"_"+best.id, {userId:userData.uid,roomId:best.id,status:"active",joinedAt:new Date().toISOString()});
+      // Set joinedRoomId in localStorage so dashboard recognizes the room
+      try { localStorage.setItem(_nsKey("kd_joinedRoomId"), String(best.id)); } catch {}
       const roomJoinedAt = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
       await fbUpdateUser(userData.uid, { niche, ageRange:age, onboardingComplete:true, onboardingQuestionsComplete:true, joinTimestamp:new Date().toISOString(), roomJoinedAt }).catch(()=>{});
       if (userData.uid){const users=_getUsersStore();if(users[userData.uid]){Object.assign(users[userData.uid],{niche,ageRange:age,onboardingComplete:true,roomJoinedAt});_saveUsersStore(users);}}
@@ -15150,7 +15152,9 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
           if (fresh) setFbData({ ...fresh });
           const freshRooms = await fbGetRooms().catch(() => null);
           if (freshRooms) setRooms(freshRooms);
+          // Use the room from matchResult first, then fallback to localStorage, then database
           const matchedRoomId = matchResult?.room?.id
+            || localStorage.getItem(_nsKey("kd_joinedRoomId"))
             || _getActiveRoomIdForUser(fbData.uid)
             || null;
           if (matchedRoomId) setJoinedRoomId(String(matchedRoomId));
