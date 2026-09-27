@@ -728,6 +728,13 @@ async function fbProcessReferral(inviterId, inviteeId) {
   } catch { return { ok: false }; }
 }
 
+async function fbActivateGrace(uid, { days, reason }) {
+  try {
+    const res = await _apiPost("/api/grace/activate", { days, reason });
+    return { ok: true, days: res.days, xpCost: res.xpCost, streak: res.streak };
+  } catch { return { ok: false }; }
+}
+
 // ── Challenges ───────────────────────────────────────────────────────────
 async function fbAcceptChallenge(challengeId, uid) {
   try { await _apiPost("/api/challenges/" + encodeURIComponent(challengeId) + "/accept"); } catch {}
@@ -1100,7 +1107,7 @@ export {
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
   fbGetLeaderboard,
   fbFollowUser, fbUnfollowUser,
-  fbGetInviterByCode, fbProcessReferral,
+  fbGetInviterByCode, fbProcessReferral, fbActivateGrace,
   fbGetCloseFriends, fbGetCloseFriendRequests, fbSendCloseFriendRequest, fbRespondCloseFriendRequest, fbRemoveCloseFriend,
   fbSendChallenge, fbGetChallengesForUser,
   fbAcceptChallenge, fbDeclineChallenge,

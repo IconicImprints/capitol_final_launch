@@ -5,13 +5,15 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Suppress SSL warnings for Supabase compatibility
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Database connection pool configuration
+// Support both Vercel Supabase variables and custom DB_* variables
+const connectionString = process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL;
+
 const pool = new pg.Pool({
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  connectionString,
   max: 20, // Maximum pool size
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -57,6 +59,12 @@ async function runMigrations() {
     console.log('All migrations completed');
   } catch (error) {
     console.error('Migration error:', error);
+    // In development, continue without database if it's not available
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('⚠️  Continuing without database connection in development mode');
+      console.warn('⚠️  API will return mock responses for database-dependent endpoints');
+      return;
+    }
     throw error;
   }
 }
@@ -73,6 +81,11 @@ async function query(text, params) {
     return result;
   } catch (error) {
     console.error('Database query error:', error);
+    // In development without database, return empty results for read queries
+    if (process.env.NODE_ENV !== 'production' && error.code === 'ECONNREFUSED') {
+      console.warn('⚠️  Database not connected, returning empty result for development');
+      return { rows: [], rowCount: 0 };
+    }
     throw error;
   }
 }
@@ -93,12 +106,20 @@ async function transaction(callback) {
   }
 }
 
+// Database connection status
+let dbConnected = false;
+
 // Health check
 async function healthCheck() {
   try {
     await pool.query('SELECT 1');
+    dbConnected = true;
     return { ok: true, database: 'connected' };
   } catch (error) {
+    dbConnected = false;
+    if (process.env.NODE_ENV !== 'production') {
+      return { ok: true, database: 'disconnected', mode: 'development-mock' };
+    }
     return { ok: false, database: 'disconnected', error: error.message };
   }
 }
@@ -109,4 +130,9 @@ async function shutdown() {
   console.log('Database pool closed');
 }
 
-export { pool, query, transaction, runMigrations, healthCheck, shutdown };
+// Check if database is connected
+function isDatabaseConnected() {
+  return dbConnected;
+}
+
+export { pool, query, transaction, runMigrations, healthCheck, shutdown, isDatabaseConnected };

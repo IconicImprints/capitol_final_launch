@@ -36,13 +36,10 @@ export const proofRateLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, // 24 hours
   max: 1, // 1 proof per day per user
   message: 'You can only submit one proof per day.',
-  keyGenerator: (req) => {
-    // Use user ID if authenticated, otherwise use IP
-    if (req.user?.id) {
-      return `user_${req.user.id}`;
-    }
-    // Use the built-in IP key generator for proper IPv6 handling
-    return req.ip;
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    return process.env.NODE_ENV === 'development' && process.env.DISABLE_RATE_LIMIT === 'true';
   },
 });
 
@@ -63,6 +60,29 @@ export const authenticate = async (req, res, next) => {
 
     req.user = session;
     req.token = token;
+    
+    // Check account status (banned/suspended)
+    if (req.user.is_banned) {
+      return res.status(403).json({
+        error: 'Account has been banned',
+        reason: req.user.suspend_reason || 'Violation of community guidelines'
+      });
+    }
+    
+    if (req.user.is_suspended) {
+      // Check if suspension has expired
+      if (req.user.suspension_end && new Date(req.user.suspension_end) < new Date()) {
+        // Suspension expired, allow but could be handled by a separate endpoint
+        return next();
+      }
+      
+      return res.status(403).json({
+        error: 'Account is temporarily suspended',
+        reason: req.user.suspend_reason || 'Violation of community guidelines',
+        suspensionEnd: req.user.suspension_end
+      });
+    }
+    
     next();
   } catch (error) {
     console.error('Authentication error:', error);

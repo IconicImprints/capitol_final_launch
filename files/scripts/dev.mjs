@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const env = { ...process.env, NODE_ENV: "development" };
 const children = [
-  spawn(npm, ["run", "dev:api"], { stdio: "inherit", env: process.env }),
-  spawn(npm, ["run", "dev:frontend"], { stdio: "inherit", env: process.env }),
+  spawn(npm, ["run", "dev:api"], { stdio: "inherit", env }),
+  spawn(npm, ["run", "dev:frontend"], { stdio: "inherit", env }),
 ];
 
 let stopping = false;

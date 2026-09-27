@@ -3,11 +3,15 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { query } from './database.js';
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || process.env.SUPABASE_JWT_SECRET || (process.env.NODE_ENV !== 'production' ? 'dev-secret-key-do-not-use-in-production' : null);
 const JWT_EXPIRES_IN = '7d';
 
 if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET environment variable is required');
+  throw new Error('JWT_SECRET environment variable is required in production');
+}
+
+if (process.env.NODE_ENV !== 'production' && !process.env.JWT_SECRET) {
+  console.warn('⚠️  Using development JWT_SECRET. Set JWT_SECRET environment variable for production.');
 }
 
 // Password hashing with bcrypt

@@ -9,7 +9,7 @@ import {
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
   fbGetLeaderboard,
   fbFollowUser, fbUnfollowUser,
-  fbGetInviterByCode, fbProcessReferral,
+  fbGetInviterByCode, fbProcessReferral, fbActivateGrace,
   fbSendChallenge, fbGetChallengesForUser,
   fbAcceptChallenge, fbDeclineChallenge,
   fbBanUser, fbUnbanUser, fbSuspendUser, fbIsBanned, fbIsSuspended,
@@ -175,12 +175,19 @@ function generateShareText({ type, streak, displayName, userId, daysSurvived, ro
   }
 }
 
-function getComebackState(userState) {
-  return userState.kickedFromRoom ? {
+function getComebackState(userState, joinedRoom) {
+  if (!userState.kickedFromRoom) return { eligible: false };
+  
+  // Check if user was the room creator
+  const isCreator = joinedRoom?.creator_uid === userState.userId || joinedRoom?.creatorId === userState.userId;
+  
+  return {
     eligible: true,
-    xpPenalty: 20,
-    message: "You were kicked. Pay 20 XP to rejoin immediately or wait 24h for free.",
-  } : { eligible: false };
+    xpPenalty: isCreator ? 0 : 20,
+    message: isCreator 
+      ? "You created this room. You can rejoin without penalty."
+      : "You were kicked. Pay 20 XP to rejoin immediately or wait 24h for free.",
+  };
 }
 
 function getDailyGesture() {
@@ -804,7 +811,6 @@ function resetInactiveStreaks(userData){if(!userData)return userData;const today
 // fbFollowUser, fbUnfollowUser imported from api.jsx
 async function fbFollow(uid,targetInit){return fbFollowUser(uid,targetInit);}
 async function fbUnfollow(uid,targetInit){return fbUnfollowUser(uid,targetInit);}
-async function fbActivateGrace(uid,{days,xpCost,newXP}){const users=_getUsersStore();if(!users[uid])return{ok:false};users[uid].xp=newXP??Math.max(0,(users[uid].xp||0)-(xpCost||0));users[uid].graceActive=true;_saveUsersStore(users);return{ok:true};}
 // ══════════════════════════════════════════════════════════════════════════════
 // SAFETY & MODERATION BACKEND
 // All data stored in localStorage under kd_safety_* keys.
@@ -4028,7 +4034,7 @@ function KickedScreen({ userState, onFindRoom, profile = {} }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── SYSTEM 7: AI NUDGE SYSTEM ─────────────────────────────────────────────────
+// ── SYSTEM 7: ACCOUNTABILITY NUDGE SYSTEM ───────────────────────────────────────
 // Short, direct Claude-generated nudges based on current streak status.
 // Fetches one nudge on mount/status-change, caches it for the session.
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4062,7 +4068,7 @@ function useAINudge(userState, submittedToday) {
     const prompt = prompts[userState.kickStatus] || prompts.flagged;
 
     callClaude([{ role: "user", content: prompt }],
-      "You are Kick, a ruthless accountability AI. One sentence only. No fluff. No emojis.",
+      "You are a ruthless accountability system. One sentence only. No fluff. No emojis.",
       80
     ).then(text => {
       if (!active) return;
@@ -4095,7 +4101,7 @@ function AINudgeBanner({ userState, submittedToday }) {
     <div style={{ background: bg, borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 10 }}>
       <Wolf size={22} variant="dark" />
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 10, fontWeight: 600, color: "#555", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 3 }}>Kick AI</div>
+        <div style={{ fontSize: 10, fontWeight: 600, color: "#555", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 3 }}>Capitol</div>
         {loading
           ? <div style={{ fontSize: 13, color: "#555", letterSpacing: 3 }}>···</div>
           : <div style={{ fontSize: 14, fontWeight: 500, color, lineHeight: 1.5 }}>{nudge}</div>}
@@ -5566,7 +5572,7 @@ function computeBadges(me, profile) {
     { icon:"crown",    name:"Elite Consistency",   cond: consistency >= 80,    desc:"80%+ consistency" },
     { icon:"bolt",     name:"Sprint Champion",     cond: xp >= 500,            desc:"500+ XP earned" },
     { icon:"skull",    name:"Burned",              cond: burned,               desc:"Failed a sprint (30 days)" },
-    { icon:"wolf", name:"Comeback Wolf",           cond: lazy,                 desc:"In recovery — AI Commentator tracking your arc" },
+    { icon:"wolf", name:"Comeback Wolf",           cond: lazy,                 desc:"In recovery — building your comeback streak" },
     { icon:"", name:"Comeback Mode",        cond: (me?.badges||[]).some(b => b.id==="lowest_xp" && new Date(b.expiresAt)>new Date()), desc:"In comeback mode — grinding back up (3-day badge)" },
   ];
   return DEFS.map(d => ({ ...d, earned: !!d.cond, date: d.date || (d.cond ? "Unlocked" : `At ${d.days || ""} day milestone`) }));
@@ -5723,13 +5729,13 @@ function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMem
       <NearMissBanner proofHistory={proofHistory} />
       <StreakAtRiskBanner submittedToday={alreadySubmittedToday} streak={userState?.streak} />
 
-      {/* AI nudge — only shown when not submitted and there's a risk */}
+      {/* Accountability nudge — only shown when not submitted and there's a risk */}
       {joinedRoom && <AINudgeBanner userState={userState} submittedToday={alreadySubmitted} />}
 
       {/* Public failure + streak warnings + vulture loot */}
       {userState && (
         <div style={{ marginBottom: 12 }}>
-          <ComebackBanner userState={userState} onRejoin={onRejoin} onFindRoom={onAutoMatch} />
+          <ComebackBanner userState={userState} onRejoin={onRejoin} onFindRoom={onAutoMatch} joinedRoom={joinedRoom} />
           <PublicFailureBanner userState={userState} me={me} />
           <StreakStatusBanner userState={userState} onSubmit={onSubmitProof} onGrace={onGrace} submittedToday={alreadySubmitted} />
           {joinedRoom && <div style={{ marginBottom: 8 }}><LiveActivityDot roomName={joinedRoom.name} /></div>}
@@ -9555,21 +9561,21 @@ function LeaderboardView({ onMemberClick, me, allUsers }) {
 // ── AuthSplitLayout — split-screen shell for auth + onboarding ────────────────
 // Desktop: brand panel (left) + form panel (right). Mobile: stacked single column.
 function AuthSplitLayout({ children, step = 0, totalSteps = 0, onBack }) {
-  const C = { bg:"#09090b", yellow:"#F5C800", text:"#f2f2f4", muted:"#71717a", surface:"#111118", border:"#1e1e2a" };
+  const C = { bg:"#ffffff", black:"#000000", text:"#000000", muted:"#666666", surface:"#f5f5f5", border:"#e0e0e0" };
   const FONT = "'Plus Jakarta Sans',-apple-system,sans-serif";
   return (
     <div style={{ minHeight:"100vh", display:"flex", background:C.bg, color:C.text, fontFamily:FONT }}>
       <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" />
       <style>{`
         *{box-sizing:border-box;margin:0;padding:0;}
-        input:focus{border-color:#F5C800!important;outline:none;}
+        input:focus{border-color:#000000!important;outline:none;}
         .cap-auth-split{display:flex;min-height:100vh;width:100%;}
-        .cap-auth-left{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:48px 40px;background:radial-gradient(ellipse at 30% 40%,#F5C80014 0%,transparent 55%),linear-gradient(160deg,#0c0c12 0%,#09090b 100%);border-right:1px solid ${C.border};position:relative;overflow:hidden;}
+        .cap-auth-left{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:48px 40px;background:radial-gradient(ellipse at 30% 40%,#00000008 0%,transparent 55%),linear-gradient(160deg,#f8f8f8 0%,#ffffff 100%);border-right:1px solid ${C.border};position:relative;overflow:hidden;}
         .cap-auth-right{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:40px 24px;background:${C.bg};}
         .cap-auth-card{width:100%;max-width:420px;}
         .cap-auth-progress{display:flex;gap:6px;margin-bottom:24px;}
         .cap-auth-progress span{flex:1;height:4px;border-radius:99px;background:${C.border};transition:background .2s;}
-        .cap-auth-progress span.on{background:${C.yellow};}
+        .cap-auth-progress span.on{background:${C.black};}
         .cap-auth-image{width:100%;height:100%;object-fit:cover;object-position:center;}
         @media (max-width:820px){
           .cap-auth-split{flex-direction:column;}
@@ -9580,7 +9586,7 @@ function AuthSplitLayout({ children, step = 0, totalSteps = 0, onBack }) {
       `}</style>
       <div className="cap-auth-split">
         <div className="cap-auth-left">
-          <div style={{ position:"absolute", inset:0, backgroundImage:"radial-gradient(circle at 70% 80%, #F5C8000d 0%, transparent 40%)", pointerEvents:"none" }} />
+          <div style={{ position:"absolute", inset:0, backgroundImage:"radial-gradient(circle at 70% 80%, #00000005 0%, transparent 40%)", pointerEvents:"none" }} />
           <img 
             src="/capitol-split-screen.png" 
             alt="Capitol" 
@@ -9634,7 +9640,7 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
   const [matchTxt, setMatchTxt] = useState("Scanning rooms…");
   const [matchedRoom, setMatchedRoom] = useState(null);
 
-  const C    = { bg:"#09090b", yellow:"#F5C800", text:"#f2f2f4", muted:"#52525b", surface:"#111118", border:"#1e1e2a", green:"#10b981" };
+  const C    = { bg:"#ffffff", black:"#000000", text:"#000000", muted:"#666666", surface:"#f5f5f5", border:"#e0e0e0", green:"#10b981" };
   const FONT = "'Plus Jakarta Sans',-apple-system,sans-serif";
   const nicheIcons = { coding:"learn_coding", video:"write_daily", design:"design_portfolio", startup:"saas_mvp", fitness:"workout" };
   const nicheNames = { coding:"Coding Sprint", video:"Content Grind", design:"Design Lab", startup:"Builder Room", fitness:"Fitness Grind" };
@@ -9696,9 +9702,9 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
           {NICHE_OPTIONS.map(opt=>(
             <button key={opt.value} onClick={()=>{setSelNiche(opt.value);setPhase("age");}}
               style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"13px 16px",borderRadius:12,background:C.surface,border:`1.5px solid ${C.border}`,color:C.text,cursor:"pointer",fontFamily:FONT,textAlign:"left",transition:"all 0.12s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.yellow;e.currentTarget.style.background="#F5C80010";}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.black;e.currentTarget.style.background="#00000010";}}
               onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.background=C.surface;}}>
-              <span style={{display:"flex",alignItems:"center",justifyContent:"center",width:36,height:36,borderRadius:9,background:"#ffffff08",flexShrink:0}}>
+              <span style={{display:"flex",alignItems:"center",justifyContent:"center",width:36,height:36,borderRadius:9,background:"#00000008",flexShrink:0}}>
                 <KDGoalIcon goalKey={nicheIcons[opt.value]||"bolt"} size={24}/>
               </span>
               <div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:C.text}}>{(opt.label||"").trim()}</div><div style={{fontSize:11,color:C.muted,marginTop:1}}>{opt.desc}</div></div>
@@ -9713,14 +9719,14 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
   if (phase==="age") return (
     <AuthSplitLayout step={phaseStep} totalSteps={4} onBack={()=>setPhase("niche")}>
       <div style={{animation:"obIn 0.25s both"}}>
-        <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Niche: <span style={{color:C.yellow,fontWeight:700}}>{selNiche}</span></div>
+        <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Niche: <span style={{color:C.black,fontWeight:700}}>{selNiche}</span></div>
         <div style={{fontWeight:900,fontSize:22,color:C.text,letterSpacing:-0.5,marginBottom:6}}>How old are you?</div>
         <div style={{fontSize:13,color:C.muted,marginBottom:22,lineHeight:1.5}}>We'll place you in the right room for your age group.</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           {AGE_RANGE_OPTIONS.map(opt=>(
             <button key={opt.value} onClick={()=>{setSelAge(opt.value);startMatching(selNiche,opt.value);}}
               style={{padding:"16px 10px",borderRadius:12,fontWeight:700,fontSize:15,textAlign:"center",background:C.surface,border:`1.5px solid ${C.border}`,color:C.text,cursor:"pointer",fontFamily:FONT,transition:"all 0.12s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.yellow;e.currentTarget.style.background="#F5C80010";e.currentTarget.style.color=C.yellow;}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.black;e.currentTarget.style.background="#00000010";e.currentTarget.style.color=C.black;}}
               onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.background=C.surface;e.currentTarget.style.color=C.text;}}>
               {opt.label}
             </button>
@@ -9737,7 +9743,7 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
         <div style={{fontWeight:800,fontSize:20,color:C.text,marginBottom:8,letterSpacing:-0.5}}>Finding your room…</div>
         <div style={{fontSize:13,color:C.muted,marginBottom:24,minHeight:20}}>{matchTxt}</div>
         <div style={{height:5,borderRadius:99,background:C.border,overflow:"hidden",marginBottom:12}}>
-          <div style={{height:"100%",borderRadius:99,background:`linear-gradient(90deg,${C.yellow},#f97316)`,width:`${progress}%`,transition:"width 0.4s cubic-bezier(0.34,1.56,0.64,1)"}}/>
+          <div style={{height:"100%",borderRadius:99,background:`linear-gradient(90deg,${C.black},#666666)`,width:`${progress}%`,transition:"width 0.4s cubic-bezier(0.34,1.56,0.64,1)"}}/>
         </div>
         <div style={{fontSize:11,color:C.muted,fontFamily:"monospace"}}>{selNiche} · Ages {(selAge||"").replace("_","-").replace("plus","+")}</div>
       </div>
@@ -9756,7 +9762,7 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
               <div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{matchedRoom.name}</div><div style={{fontSize:12,color:C.muted,marginTop:2}}>{matchedRoom.goal}</div></div>
             </div>
             <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
-              <span style={{fontSize:11,padding:"3px 9px",borderRadius:99,background:"#F5C80015",color:C.yellow,fontWeight:700}}>{matchedRoom.niche}</span>
+              <span style={{fontSize:11,padding:"3px 9px",borderRadius:99,background:"#00000015",color:C.black,fontWeight:700}}>{matchedRoom.niche}</span>
               <span style={{fontSize:11,padding:"3px 9px",borderRadius:99,background:"#10b98115",color:C.green,fontWeight:700}}>Ages {(matchedRoom.ageRange||"").replace("_","-").replace("plus","+")}</span>
             </div>
           </div>
@@ -9896,38 +9902,38 @@ function LandingPage({ onEnter }) {
     { n: "06", title: "compete & improve", body: "Climb the leaderboard, join community challenges, and keep raising the bar." },
   ];
   const FEATURES = [
-    { icon: "◈", title: "Accountability Rooms", body: "Structured groups built around a shared goal, where progress is visible to everyone." },
-    { icon: "◇", title: "XP & Streak System", body: "Earn experience for every completed task and build streaks that compound over time." },
-    { icon: "≋", title: "Leaderboards", body: "A ranked system based on XP, streaks, and completed tasks — pure output and consistency." },
-    { icon: "⊞", title: "Community Challenges", body: "Recurring sprints and streak challenges designed to push consistency across the room." },
-    { icon: "⟁", title: "Progress Analytics", body: "Track your growth over time with clear, structured analytics on every goal." },
-    { icon: "⊗", title: "Social Productivity", body: "Work alongside others, share progress, and stay accountable as a community." },
-    { icon: "⬡", title: "Networking", body: "Connect with like-minded, ambitious users building toward similar goals." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><rect x="4" y="8" width="24" height="20" rx="2" stroke="#111" strokeWidth="2"/><path d="M8 4h16v4H8z" stroke="#111" strokeWidth="2"/><circle cx="10" cy="16" r="2" fill="#111"/><circle cx="16" cy="16" r="2" fill="#111"/><circle cx="22" cy="16" r="2" fill="#111"/></svg>, title: "Accountability Rooms", body: "Structured groups built around a shared goal, where progress is visible to everyone." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 2 L16 30 M2 16 L30 16" stroke="#111" strokeWidth="2"/><circle cx="16" cy="16" r="10" stroke="#111" strokeWidth="2"/><path d="M16 6 L16 10 M16 22 L16 26 M6 16 L10 16 M22 16 L26 16" stroke="#111" strokeWidth="2"/></svg>, title: "XP & Streak System", body: "Earn experience for every completed task and build streaks that compound over time." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><rect x="8" y="4" width="16" height="24" rx="2" stroke="#111" strokeWidth="2"/><path d="M12 4 L12 28 M20 4 L20 28" stroke="#111" strokeWidth="2"/><circle cx="16" cy="12" r="2" fill="#111"/><circle cx="16" cy="20" r="2" fill="#111"/></svg>, title: "Leaderboards", body: "A ranked system based on XP, streaks, and completed tasks — pure output and consistency." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 4 L20 12 L28 14 L22 20 L24 28 L16 24 L8 28 L10 20 L4 14 L12 12 Z" stroke="#111" strokeWidth="2" fill="none"/></svg>, title: "Community Challenges", body: "Recurring sprints and streak challenges designed to push consistency across the room." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M4 28 L4 8 L12 4 L20 8 L28 4 L28 24 L20 28 L12 24 L4 28 Z" stroke="#111" strokeWidth="2" fill="none"/><path d="M12 4 L12 24 M20 8 L20 28" stroke="#111" strokeWidth="2"/></svg>, title: "Progress Analytics", body: "Track your growth over time with clear, structured analytics on every goal." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><circle cx="12" cy="12" r="6" stroke="#111" strokeWidth="2"/><circle cx="20" cy="20" r="6" stroke="#111" strokeWidth="2"/><path d="M16 16 L16 16" stroke="#111" strokeWidth="2"/></svg>, title: "Social Productivity", body: "Work alongside others, share progress, and stay accountable as a community." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="12" stroke="#111" strokeWidth="2"/><circle cx="16" cy="16" r="4" fill="#111"/><path d="M16 4 L16 8 M16 24 L16 28 M4 16 L8 16 M24 16 L28 16" stroke="#111" strokeWidth="2"/></svg>, title: "Networking", body: "Connect with like-minded, ambitious users building toward similar goals." },
   ];
   const PROBLEMS = [
     { label: "real pressure,\nnot notifications", body: "A push notification is easy to ignore. Eight people watching you fail is not. Social pressure works because you don't want to let real people down." },
-    { label: "proof over\npromises", body: "Anyone can say they worked out. We require you to show it. AI validates every submission. Fake progress doesn't pass." },
+    { label: "proof over\npromises", body: "Anyone can say they worked out. We require you to show it. Submissions are validated. Fake progress doesn't pass." },
     { label: "intensity\nby design", body: "The auto-kick system isn't punitive — it's protective. It keeps rooms full of people who actually show up, which raises the bar for everyone." },
   ];
   const ROOMS = [
-    { icon: "◎", title: "Study & Exam Prep", body: "Stay on track with revision schedules, deep work sessions, and peers grinding toward the same exams." },
-    { icon: "⟁", title: "Coding & Development", body: "Ship daily. Build projects, learn new stacks, and stay accountable alongside other developers." },
-    { icon: "⊗", title: "Fitness & Health", body: "Train consistently with a group that notices when you skip a day — and celebrates when you don't." },
-    { icon: "◇", title: "Startup Building", body: "Build in public, ship fast, and stay accountable to the milestones that actually move your startup forward." },
-    { icon: "⊞", title: "Content Creation", body: "Post consistently with creators who hold each other to a publishing schedule." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><rect x="4" y="4" width="24" height="24" rx="2" stroke="#111" strokeWidth="2"/><path d="M8 12 L24 12 M8 18 L20 18 M8 24 L16 24" stroke="#111" strokeWidth="2"/></svg>, title: "Study & Exam Prep", body: "Stay on track with revision schedules, deep work sessions, and peers grinding toward the same exams." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M8 4 L24 4 L28 10 L28 28 L4 28 L4 10 Z" stroke="#111" strokeWidth="2" fill="none"/><path d="M12 18 L14 22 L20 14" stroke="#111" strokeWidth="2"/></svg>, title: "Coding & Development", body: "Ship daily. Build projects, learn new stacks, and stay accountable alongside other developers." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 4 L20 12 L28 12 L22 18 L24 26 L16 22 L8 26 L10 18 L4 12 L12 12 Z" stroke="#111" strokeWidth="2" fill="none"/></svg>, title: "Fitness & Health", body: "Train consistently with a group that notices when you skip a day — and celebrates when you don't." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 4 L16 10 M12 6 L16 4 L20 6 M4 16 L10 16 M6 12 L4 16 L6 20 M28 16 L22 16 M26 12 L28 16 L26 20 M16 28 L16 22 M12 24 L16 28 L20 24" stroke="#111" strokeWidth="2"/><circle cx="16" cy="16" r="6" stroke="#111" strokeWidth="2"/></svg>, title: "Startup Building", body: "Build in public, ship fast, and stay accountable to the milestones that actually move your startup forward." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><rect x="4" y="6" width="24" height="20" rx="2" stroke="#111" strokeWidth="2"/><circle cx="10" cy="16" r="3" fill="#111"/><path d="M16 10 L28 10 M16 16 L24 16 M16 22 L20 22" stroke="#111" strokeWidth="2"/></svg>, title: "Content Creation", body: "Post consistently with creators who hold each other to a publishing schedule." },
   ];
   const CHALLENGES = [
-    { icon: "≋", title: "7-Day Streak Challenges", body: "Show up every day for a week straight. Miss a day and the streak resets." },
-    { icon: "◈", title: "Study Sprints", body: "Focused, time-boxed study blocks with the whole room grinding at once." },
-    { icon: "⟁", title: "Building Sprints", body: "Ship a feature, a project, or a milestone within a fixed window." },
-    { icon: "⊗", title: "Fitness Challenges", body: "Group fitness goals that reward consistency over intensity." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 4 L20 12 L28 12 L22 18 L24 26 L16 22 L8 26 L10 18 L4 12 L12 12 Z" stroke="#111" strokeWidth="2" fill="none"/></svg>, title: "7-Day Streak Challenges", body: "Show up every day for a week straight. Miss a day and the streak resets." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><rect x="4" y="4" width="24" height="24" rx="2" stroke="#111" strokeWidth="2"/><path d="M8 12 L24 12 M8 18 L20 18 M8 24 L16 24" stroke="#111" strokeWidth="2"/></svg>, title: "Study Sprints", body: "Focused, time-boxed study blocks with the whole room grinding at once." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M8 4 L24 4 L28 10 L28 28 L4 28 L4 10 Z" stroke="#111" strokeWidth="2" fill="none"/><path d="M12 18 L14 22 L20 14" stroke="#111" strokeWidth="2"/></svg>, title: "Building Sprints", body: "Ship a feature, a project, or a milestone within a fixed window." },
+    { icon: <svg width={32} height={32} viewBox="0 0 32 32" fill="none"><path d="M16 4 L16 10 M12 6 L16 4 L20 6 M4 16 L10 16 M6 12 L4 16 L6 20 M28 16 L22 16 M26 12 L28 16 L26 20 M16 28 L16 22 M12 24 L16 28 L20 24" stroke="#111" strokeWidth="2"/><circle cx="16" cy="16" r="6" stroke="#111" strokeWidth="2"/></svg>, title: "Fitness Challenges", body: "Group fitness goals that reward consistency over intensity." },
   ];
   function scrollTo(id) { document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }); }
 
   const C = {
-    bg:"#0a0a0f", surface:"#111118", surfaceHi:"#16161e", border:"#1e1e2a", borderHi:"#2a2a3a",
-    yellow:"#f5c842", yellowDim:"#f5c84218", yellowBrd:"#f5c84235",
-    red:"#ef4444", green:"#22c55e", text:"#f4f4f8", muted:"#6b6b80", faint:"#3a3a4a",
+    bg:"#ffffff", surface:"#f5f5f5", surfaceHi:"#e8e8e8", border:"#e0e0e0", borderHi:"#cccccc",
+    black:"#000000", blackDim:"#00000018", blackBrd:"#00000035",
+    red:"#ef4444", green:"#22c55e", text:"#000000", muted:"#666666", faint:"#999999",
   };
   const FONT = "\'Plus Jakarta Sans\', -apple-system, sans-serif";
   const inp = {
@@ -10035,17 +10041,14 @@ function LandingPage({ onEnter }) {
           {authError && (
             <div style={{ fontSize:12, color:C.red, background:"#ef444415", border:"1px solid #ef444430", borderRadius:8, padding:"8px 12px" }}>{authError}</div>
           )}
-          <button onClick={isLogin ? handleLogin : handleSignup} disabled={authLoading}
-            style={{ width:"100%", background: authLoading ? C.faint : C.yellow, color:"#0a0a0f", border:"none", borderRadius:12, padding:"14px 0", fontWeight:800, fontSize:15, fontFamily:FONT, cursor: authLoading ? "not-allowed" : "pointer", marginTop:4, opacity: authLoading ? 0.7 : 1, transition:"all 0.15s", userSelect:"none" }}>
-            {authLoading ? (isLogin ? "Signing in…" : "Creating account…") : (isLogin ? "Sign in" : "Create account")}
+          <button onClick={isLogin ? handleLogin : null} disabled={!isLogin || authLoading}
+            style={{ width:"100%", background: authLoading ? C.faint : C.black, color:"#ffffff", border:"none", borderRadius:12, padding:"14px 0", fontWeight:800, fontSize:15, fontFamily:FONT, cursor: !isLogin || authLoading ? "not-allowed" : "pointer", marginTop:4, opacity: authLoading ? 0.7 : 1, transition:"all 0.15s", userSelect:"none" }}>
+            {authLoading ? "Signing in…" : "Sign in"}
           </button>
         </div>
 
         <div style={{ marginTop:20, fontSize:13, color:C.muted }}>
-          {isLogin
-            ? (<>No account?{" "}<span onClick={() => { resetForm(); setScreen("signup"); }} style={{ color:C.yellow, cursor:"pointer", fontWeight:700 }}>Sign up free</span></>)
-            : (<>Already a member?{" "}<span onClick={() => { resetForm(); setScreen("login"); }} style={{ color:C.yellow, cursor:"pointer", fontWeight:700 }}>Sign in</span></>)
-          }
+          Account creation is currently disabled. Contact administrator for access.
         </div>
       </AuthSplitLayout>
     );
@@ -10902,9 +10905,9 @@ function BurnedBadge({ profile, compact = false }) {
   );
 }
 
-function ComebackBanner({ userState, onRejoin, onFindRoom }) {
+function ComebackBanner({ userState, onRejoin, onFindRoom, joinedRoom }) {
   const { T } = useTheme();
-  const cb = getComebackState(userState);
+  const cb = getComebackState(userState, joinedRoom);
   if (!cb.eligible) return null;
   
   // Show specific reason based on kick_status
@@ -10930,7 +10933,11 @@ function ComebackBanner({ userState, onRejoin, onFindRoom }) {
       <div style={{ fontWeight: 700, fontSize: 14, color: "#ef4444", marginBottom: 6, display:"flex", alignItems:"center", gap:5 }}><KDSkull size={18}/>You were kicked</div>
       <div style={{ fontSize: 13, color: T.errorText, marginBottom: 12 }}>{message}</div>
       <div style={{ display: "flex", gap: 8 }}>
-        <Btn size="sm" variant="danger" onClick={onRejoin}>Pay {cb.xpPenalty} XP · Rejoin now</Btn>
+        {cb.xpPenalty > 0 ? (
+          <Btn size="sm" variant="danger" onClick={onRejoin}>Pay {cb.xpPenalty} XP · Rejoin now</Btn>
+        ) : (
+          <Btn size="sm" variant="primary" onClick={onRejoin}>Rejoin now</Btn>
+        )}
         <Btn size="sm" variant="ghost" onClick={onFindRoom}>Find new room</Btn>
       </div>
     </div>
@@ -12421,7 +12428,7 @@ function DailyQuestRow({ quest, completed, onClaim, pomosToday = 0, focusMinsTod
 function GoalCardV3({ goal, ms, urgent, fmtDeadline, onComplete, onDelete, onProofUploaded, isCompleting, isLocked, T }) {
   const completedToday = goal.completedToday === todayKey();
 
-  // AI verification state
+  // Verification state
   const [aiPhase, setAiPhase] = useState("idle"); // idle | input | verifying | done | denied
   const [proofNote, setProofNote] = useState("");
   const [aiResult, setAiResult] = useState(null);
@@ -14276,13 +14283,24 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
 
   // ── Instant comeback rejoin ───────────────────────────────────────────────────
   async function handleComebackRejoin() {
-    const penalty = 20;
+    const cb = getComebackState(userState, joinedRoom);
+    const penalty = cb.xpPenalty;
     const currentXP = userState.xp ?? 0;
-    if (currentXP < penalty) { showToast("Not enough XP for instant rejoin", "error"); return; }
+    
+    if (penalty > 0 && currentXP < penalty) { 
+      showToast("Not enough XP for instant rejoin", "error"); 
+      return; 
+    }
+    
     const newXP = currentXP - penalty;
     manualSet(prev => ({ ...prev, xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }));
     if (uid) await fbUpdateUser(uid, { xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }).catch(() => {});
-    showToast(`-${penalty} XP paid. You can rejoin a room now.`, "success");
+    
+    if (penalty > 0) {
+      showToast(`-${penalty} XP paid. You can rejoin a room now.`, "success");
+    } else {
+      showToast("You can rejoin a room now.", "success");
+    }
   }
 
   // ── Premium toggle → Firestore ────────────────────────────────────────────────
@@ -14448,14 +14466,31 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
     if (userState.kickStatus === "kicked") { showToast("Grace cannot be activated after a kick.", "error"); return; }
     const xpCost = n * 5;
     const newXP = Math.max(0, (userState.xp ?? 0) - xpCost);
+    const currentStreak = userState.streak ?? 0;
+    
     manualSet(prev => ({
       ...prev, xp: newXP, graceActive: true, graceStartDate: todayStr(),
       graceDaysTotal: n, graceUsedThisMonth: effectiveUsed + 1,
-      graceLastMonth: thisMonth, kickStatus: "ok", warned: false,
+      graceLastMonth: thisMonth, kickStatus: "ok", warned: false, missedDays: 0,
+      // Preserve streak when grace is used
+      streak: currentStreak,
     }));
     setGracePeriod({ daysRemaining: n, startDate: todayStr(), totalDays: n });
-    if (uid) await fbActivateGrace(uid, { days: n, xpCost, newXP }).catch(() => {});
-    if (uid) await fbUpdateUser(uid, { graceUsedThisMonth: effectiveUsed + 1, graceLastMonth: thisMonth }).catch(() => {});
+    if (uid) await fbActivateGrace(uid, { days: n, reason }).catch(() => {});
+    
+    // Add system message to room chat
+    if (joinedRoom) {
+      const systemMsg = {
+        id: `grace_${Date.now()}`,
+        userId: 'system',
+        username: 'System',
+        text: `${me.name || me.userId} used a Grace for today.`,
+        timestamp: new Date().toISOString(),
+        system: true,
+      };
+      setChatHistory(prev => [...prev, systemMsg]);
+    }
+    
     setGraceOpen(false);
     showToast(`Grace activated: ${n} day${n>1?"s":""} · −${xpCost} XP`, "success");
   }
@@ -14533,7 +14568,15 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   async function handleInviteToRoom(person) {
     if (!joinedRoom) { showToast("Join a room first to invite others", "error"); return; }
     if (!person?.userId && !person?.init) { showToast("Invalid user", "error"); return; }
+    
+    // Check if person is a friend
+    const friends = loadFriends();
     const recipientId = person.uid || person.userId;
+    if (!friends.includes(recipientId)) {
+      showToast("You can only invite friends to your room", "error");
+      return;
+    }
+    
     const notifData = {
       roomId: joinedRoom.id, senderId: me.userId || me.init,
       inviterName: me.name || me.userId, inviterInit: me.init,

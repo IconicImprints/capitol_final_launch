@@ -12,7 +12,7 @@ import { query, transaction, runMigrations, healthCheck, shutdown } from './data
 import {
   hashPassword,
   verifyPassword,
-  createSession,
+  generateToken,
   destroySession,
   destroyAllUserSessions,
   startCleanupInterval
@@ -28,6 +28,15 @@ import {
   requireAdmin,
   requestLogger
 } from './middleware.js';
+import {
+  getRecentModerationEvents,
+  getUserModerationHistory,
+  getUserStrikes,
+  markFalsePositive,
+  updateProhibitedTerm,
+  moderateContent,
+  CONTENT_TYPES
+} from './moderation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -174,6 +183,24 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   }
 
   try {
+    // Moderate username
+    const usernameResult = await moderateContent({
+      userId: null, // No user ID yet during signup
+      content: username,
+      contentType: CONTENT_TYPES.USERNAME,
+      contentId: null
+    });
+    
+    if (!usernameResult.allowed) {
+      return res.status(400).json({
+        error: 'Username violates community guidelines',
+        moderation: {
+          action: usernameResult.action,
+          severity: usernameResult.severity
+        }
+      });
+    }
+
     const result = await transaction(async (client) => {
       // Check if username exists
       const existingUser = await client.query(
@@ -228,7 +255,15 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         ]
       );
 
-      const token = await createSession(id, req.ip, req.headers['user-agent']);
+      // Create session within the same transaction
+      const token = generateToken(id);
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+      await client.query(
+        `INSERT INTO sessions (token, user_id, created_at, expires_at, ip_address, user_agent)
+         VALUES ($1, $2, NOW(), $3, $4, $5)`,
+        [token, id, expiresAt, req.ip, req.headers['user-agent']]
+      );
       
       const userResult = await client.query('SELECT * FROM users WHERE id = $1', [id]);
       return { token, user: selfUser(userResult.rows[0]) };
@@ -268,14 +303,21 @@ app.post('/api/auth/login', authRateLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Update last seen
+    // Update last seen and create session
+    const token = generateToken(user.id);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
     await query(
       'UPDATE users SET last_seen_at = NOW() WHERE id = $1',
       [user.id]
     );
 
-    const token = await createSession(user.id, req.ip, req.headers['user-agent']);
-    
+    await query(
+      `INSERT INTO sessions (token, user_id, created_at, expires_at, ip_address, user_agent)
+       VALUES ($1, $2, NOW(), $3, $4, $5)`,
+      [token, user.id, expiresAt, req.ip, req.headers['user-agent']]
+    );
+
     res.json({ token, user: selfUser(user) });
   } catch (e) {
     console.error('Login error:', e);
@@ -326,6 +368,48 @@ app.patch('/api/users/me', authenticate, async (req, res) => {
     'display_name', 'photo_url', 'avatar_config', 'banner_url', 'bio', 'pronouns',
     'timezone', 'social_links', 'niche', 'age_range', 'safety_accepted'
   ];
+
+  // Moderate display name if present
+  if (body.display_name) {
+    const displayNameResult = await moderateContent({
+      userId: req.user.id,
+      content: body.display_name,
+      contentType: CONTENT_TYPES.DISPLAY_NAME,
+      contentId: req.user.id
+    });
+    
+    if (!displayNameResult.allowed) {
+      return res.status(403).json({
+        error: displayNameResult.userMessage || 'Display name violates community guidelines',
+        moderation: {
+          action: displayNameResult.action,
+          severity: displayNameResult.severity,
+          eventId: displayNameResult.eventId
+        }
+      });
+    }
+  }
+
+  // Moderate bio if present
+  if (body.bio) {
+    const bioResult = await moderateContent({
+      userId: req.user.id,
+      content: body.bio,
+      contentType: CONTENT_TYPES.BIO,
+      contentId: req.user.id
+    });
+    
+    if (!bioResult.allowed) {
+      return res.status(403).json({
+        error: bioResult.userMessage || 'Bio violates community guidelines',
+        moderation: {
+          action: bioResult.action,
+          severity: bioResult.severity,
+          eventId: bioResult.eventId
+        }
+      });
+    }
+  }
 
   const updates = [];
   const values = [];
@@ -1157,6 +1241,317 @@ app.delete('/api/users/follow/:targetId', authenticate, async (req, res) => {
   }
 });
 
+// ── Close Friends ─────────────────────────────────────────────────────────────
+app.get('/api/close-friends', authenticate, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM close_friends 
+       WHERE a = $1 OR b = $1`,
+      [req.user.id]
+    );
+    
+    const friendIds = result.rows.map(f => f.a === req.user.id ? f.b : f.a);
+    
+    if (friendIds.length === 0) {
+      return res.json({ friends: [] });
+    }
+    
+    const usersResult = await query(
+      `SELECT * FROM users WHERE id = ANY($1)`,
+      [friendIds]
+    );
+    
+    res.json({ friends: usersResult.rows.map(publicUser) });
+  } catch (e) {
+    console.error('Get close friends error:', e);
+    res.status(500).json({ error: 'Failed to get close friends' });
+  }
+});
+
+app.get('/api/close-friends/requests', authenticate, async (req, res) => {
+  try {
+    const sentResult = await query(
+      `SELECT * FROM close_friend_requests WHERE from_user_id = $1 AND status = 'pending'`,
+      [req.user.id]
+    );
+    
+    const receivedResult = await query(
+      `SELECT * FROM close_friend_requests WHERE to_user_id = $1 AND status = 'pending'`,
+      [req.user.id]
+    );
+    
+    res.json({ sent: sentResult.rows, received: receivedResult.rows });
+  } catch (e) {
+    console.error('Get friend requests error:', e);
+    res.status(500).json({ error: 'Failed to get friend requests' });
+  }
+});
+
+app.post('/api/close-friends/request', authenticate, async (req, res) => {
+  const { targetId } = req.body || {};
+  
+  try {
+    await transaction(async (client) => {
+      if (targetId === req.user.id) {
+        throw Object.assign(new Error('Cannot friend self'), { status: 400 });
+      }
+      
+      const requestId = rid('cfr');
+      await client.query(
+        `INSERT INTO close_friend_requests (id, from_user_id, to_user_id, status, created_at)
+         VALUES ($1, $2, $3, 'pending', NOW())`,
+        [requestId, req.user.id, targetId]
+      );
+      
+      const notifId = rid('notif');
+      await client.query(
+        `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+         VALUES ($1, $2, 'friend_request', false, NOW(), $3)`,
+        [notifId, targetId, JSON.stringify({
+          requestId,
+          fromUid: req.user.id,
+          fromName: req.user.display_name,
+          fromUsername: req.user.username
+        })]
+      );
+    });
+    
+    res.json({ ok: true, requestId });
+  } catch (e) {
+    console.error('Send friend request error:', e);
+    if (e.status) {
+      res.status(e.status).json({ error: e.message });
+    } else {
+      res.status(500).json({ error: 'Failed to send friend request' });
+    }
+  }
+});
+
+app.post('/api/close-friends/respond', authenticate, async (req, res) => {
+  const { requestId, accept } = req.body || {};
+  
+  try {
+    await transaction(async (client) => {
+      const requestResult = await client.query(
+        `SELECT * FROM close_friend_requests WHERE id = $1 AND to_user_id = $2`,
+        [requestId, req.user.id]
+      );
+      
+      if (requestResult.rows.length === 0) {
+        throw Object.assign(new Error('Request not found'), { status: 404 });
+      }
+      
+      const request = requestResult.rows[0];
+      
+      await client.query(
+        `UPDATE close_friend_requests SET status = $1 WHERE id = $2`,
+        [accept ? 'accepted' : 'declined', requestId]
+      );
+      
+      if (accept) {
+        const friendId = rid('cf');
+        await client.query(
+          `INSERT INTO close_friends (id, a, b, created_at)
+           VALUES ($1, $2, $3, NOW())`,
+          [friendId, request.from_user_id, request.to_user_id]
+        );
+      }
+    });
+    
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Respond to friend request error:', e);
+    if (e.status) {
+      res.status(e.status).json({ error: e.message });
+    } else {
+      res.status(500).json({ error: 'Failed to respond to friend request' });
+    }
+  }
+});
+
+app.delete('/api/close-friends/:friendId', authenticate, async (req, res) => {
+  const friendId = req.params.friendId;
+  
+  try {
+    await query(
+      `DELETE FROM close_friends 
+       WHERE (a = $1 AND b = $2) OR (a = $2 AND b = $1)`,
+      [req.user.id, friendId]
+    );
+    
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Remove friend error:', e);
+    res.status(500).json({ error: 'Failed to remove friend' });
+  }
+});
+
+// ── Grace Period ───────────────────────────────────────────────────────────────
+app.post('/api/grace/activate', authenticate, async (req, res) => {
+  const { days, reason } = req.body || {};
+  const n = parseInt(days, 10);
+  
+  try {
+    await transaction(async (client) => {
+      if (isNaN(n) || n < 1) {
+        throw Object.assign(new Error('Invalid days'), { status: 400 });
+      }
+      
+      if (!reason || reason.trim().length < 10) {
+        throw Object.assign(new Error('Reason too short'), { status: 400 });
+      }
+      
+      const userResult = await client.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+      const user = userResult.rows[0];
+      
+      const thisMonth = new Date().toISOString().slice(0, 7);
+      const graceLastMonth = user.grace_last_month || '';
+      const graceUsedThisMonth = user.grace_used_this_month || 0;
+      const effectiveUsed = graceLastMonth === thisMonth ? graceUsedThisMonth : 0;
+      
+      if (effectiveUsed >= 2) {
+        throw Object.assign(new Error('You\'ve used both grace slots this month'), { status: 400 });
+      }
+      
+      if (user.grace_active) {
+        throw Object.assign(new Error('Grace period is already active'), { status: 400 });
+      }
+      
+      if (user.kick_status === 'kicked') {
+        throw Object.assign(new Error('Grace cannot be activated after a kick'), { status: 400 });
+      }
+      
+      const xpCost = n * 5;
+      const currentStreak = user.streak || 0;
+      
+      await updateUserXP(client, req.user.id, -xpCost, 'grace');
+      
+      await client.query(
+        `UPDATE users 
+         SET grace_active = true, 
+             grace_start_date = NOW(),
+             grace_days_total = $1,
+             grace_used_this_month = $2,
+             grace_last_month = $3,
+             kick_status = 'ok',
+             warned = false,
+             missed_days = 0,
+             streak = $4
+         WHERE id = $5`,
+        [n, effectiveUsed + 1, thisMonth, currentStreak, req.user.id]
+      );
+      
+      res.json({ ok: true, days: n, xpCost, streak: currentStreak });
+    });
+  } catch (e) {
+    console.error('Grace activation error:', e);
+    if (e.status) {
+      res.status(e.status).json({ error: e.message });
+    } else {
+      res.status(500).json({ error: 'Grace activation failed' });
+    }
+  }
+});
+
+// ── Inactivity Check (3-day rule) ───────────────────────────────────────────────
+// Run daily to check for inactive users and apply warnings/kicks
+app.post('/api/admin/check-inactivity', requireAdmin, async (req, res) => {
+  try {
+    await transaction(async (client) => {
+      const configResult = await client.query("SELECT value FROM config WHERE key = 'system'");
+      const config = configResult.rows[0]?.value || {};
+      const inactivityThresholdDays = config.inactivityThresholdDays || 3;
+      
+      // Get all active room members
+      const membersResult = await client.query(
+        `SELECT rm.*, u.username, u.display_name, u.last_submit_date, u.missed_days, u.kick_status
+         FROM room_members rm
+         JOIN users u ON rm.user_id = u.id
+         WHERE rm.status = 'active'`
+      );
+      
+      const today = new Date();
+      const warningsIssued = [];
+      const kicksIssued = [];
+      
+      for (const member of membersResult.rows) {
+        const lastSubmitDate = member.last_submit_date ? new Date(member.last_submit_date) : null;
+        const daysSince = lastSubmitDate ? Math.floor((today - lastSubmitDate) / (1000 * 60 * 60 * 24)) : 999;
+        
+        if (daysSince >= inactivityThresholdDays) {
+          // 3+ days missed - kick the user
+          await client.query(
+            `UPDATE room_members SET status = 'kicked', left_at = NOW(), inactive_since = NOW(), inactive_reason = 'No proof for 3+ days'
+             WHERE id = $1`,
+            [member.id]
+          );
+          
+          await client.query(
+            `UPDATE users SET kicked_from_room = true, kick_status = 'inactive', burned_at = NOW(), missed_days = 3
+             WHERE id = $1`,
+            [member.user_id]
+          );
+          
+          // Apply XP penalty
+          await updateUserXP(client, member.user_id, -20, 'inactive_kick');
+          
+          // Create notification
+          const notifId = rid('notif');
+          await client.query(
+            `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+             VALUES ($1, $2, 'kick', false, NOW(), $3)`,
+            [notifId, member.user_id, JSON.stringify({
+              reason: 'Inactive for 3+ days',
+              roomId: member.room_id
+            })]
+          );
+          
+          kicksIssued.push({ userId: member.user_id, username: member.username, daysSince });
+        } else if (daysSince === 2) {
+          // 2 days missed - issue warning
+          if (member.kick_status !== 'warned') {
+            await client.query(
+              `UPDATE users SET kick_status = 'warned', missed_days = 2 WHERE id = $1`,
+              [member.user_id]
+            );
+            
+            // Create warning notification
+            const notifId = rid('notif');
+            await client.query(
+              `INSERT INTO notifications (id, user_id, type, read, created_at, data)
+               VALUES ($1, $2, 'kick', false, NOW(), $3)`,
+              [notifId, member.user_id, JSON.stringify({
+                reason: 'Warning: 2 days missed. Submit proof today to avoid removal.',
+                roomId: member.room_id
+              })]
+            );
+            
+            warningsIssued.push({ userId: member.user_id, username: member.username, daysSince });
+          }
+        } else if (daysSince === 1) {
+          // 1 day missed - flag user
+          if (member.kick_status === 'ok') {
+            await client.query(
+              `UPDATE users SET kick_status = 'flagged', missed_days = 1 WHERE id = $1`,
+              [member.user_id]
+            );
+          }
+        }
+      }
+      
+      res.json({ 
+        ok: true, 
+        checked: membersResult.rows.length,
+        warningsIssued,
+        kicksIssued
+      });
+    });
+  } catch (e) {
+    console.error('Inactivity check error:', e);
+    res.status(500).json({ error: 'Inactivity check failed' });
+  }
+});
+
 // ── Freeze Tokens ─────────────────────────────────────────────────────────────
 app.get('/api/economy/freeze-tokens', authenticate, async (req, res) => {
   const result = await query(
@@ -1255,6 +1650,58 @@ app.patch('/api/admin/config', authenticate, requireAdmin, async (req, res) => {
   } catch (e) {
     console.error('Config update error:', e);
     res.status(500).json({ error: 'Config update failed' });
+  }
+});
+
+// ── Moderation Admin Endpoints ───────────────────────────────────────────────
+app.get('/api/admin/moderation/events', authenticate, requireAdmin, async (req, res) => {
+  const { limit = 50 } = req.query;
+  try {
+    const events = await getRecentModerationEvents(parseInt(limit));
+    res.json({ events });
+  } catch (e) {
+    console.error('Get moderation events error:', e);
+    res.status(500).json({ error: 'Failed to get moderation events' });
+  }
+});
+
+app.get('/api/admin/moderation/user/:userId', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const [events, strikes] = await Promise.all([
+      getUserModerationHistory(req.params.userId),
+      getUserStrikes(req.params.userId)
+    ]);
+    
+    res.json({ events, strikes });
+  } catch (e) {
+    console.error('Get user moderation history error:', e);
+    res.status(500).json({ error: 'Failed to get user moderation history' });
+  }
+});
+
+app.post('/api/admin/moderation/false-positive/:eventId', authenticate, requireAdmin, async (req, res) => {
+  try {
+    await markFalsePositive(req.params.eventId, req.user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Mark false positive error:', e);
+    res.status(500).json({ error: 'Failed to mark as false positive' });
+  }
+});
+
+app.post('/api/admin/moderation/prohibited-term', authenticate, requireAdmin, async (req, res) => {
+  const { term, category, severity, isActive, requiresContext } = req.body || {};
+  
+  if (!term || !category || !severity) {
+    return res.status(400).json({ error: 'Missing required fields: term, category, severity' });
+  }
+  
+  try {
+    await updateProhibitedTerm(term, category, severity, isActive, requiresContext);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Update prohibited term error:', e);
+    res.status(500).json({ error: 'Failed to update prohibited term' });
   }
 });
 
