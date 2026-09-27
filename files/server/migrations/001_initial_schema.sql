@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   display_name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
-  password_salt TEXT NOT NULL,
   photo_url TEXT,
   avatar_config JSONB,
   banner_url TEXT,

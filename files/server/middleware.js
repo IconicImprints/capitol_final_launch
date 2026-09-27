@@ -15,6 +15,10 @@ export const rateLimiter = rateLimit({
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting in development if needed
+    return process.env.NODE_ENV === 'development' && process.env.DISABLE_RATE_LIMIT === 'true';
+  },
 });
 
 // Stricter rate limiting for auth endpoints
@@ -22,6 +26,9 @@ export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5, // 5 requests per 15 minutes for auth
   message: 'Too many authentication attempts, please try again later.',
+  skip: (req) => {
+    return process.env.NODE_ENV === 'development' && process.env.DISABLE_RATE_LIMIT === 'true';
+  },
 });
 
 // Rate limiting for proof submission
@@ -30,7 +37,12 @@ export const proofRateLimiter = rateLimit({
   max: 1, // 1 proof per day per user
   message: 'You can only submit one proof per day.',
   keyGenerator: (req) => {
-    return req.user?.id || rateLimit.ipKeyGenerator(req);
+    // Use user ID if authenticated, otherwise use IP
+    if (req.user?.id) {
+      return `user_${req.user.id}`;
+    }
+    // Use the built-in IP key generator for proper IPv6 handling
+    return req.ip;
   },
 });
 

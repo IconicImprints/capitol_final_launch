@@ -216,7 +216,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
           niche, age_range, room_joined_at, onboard_bonus_awarded,
           safety_accepted, invite_code, invites_count, burned_at,
           following, premium, xp_awarded_keys
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)`,
         [
           id, username, email.toLowerCase(), displayName.trim(), passwordHash,
           JSON.stringify({ background: palette[avatarHash % palette.length], letter: username[0].toUpperCase() }),
@@ -236,9 +236,6 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
 
     res.json(result);
   } catch (e) {
-    if (e.message === 'Database not configured') {
-      return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
-    }
     res.status(e.status || 500).json({ error: e.message || 'Signup failed' });
   }
 });
@@ -281,9 +278,6 @@ app.post('/api/auth/login', authRateLimiter, async (req, res) => {
     
     res.json({ token, user: selfUser(user) });
   } catch (e) {
-    if (e.message === 'Database not configured') {
-      return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
-    }
     console.error('Login error:', e);
     res.status(500).json({ error: 'Login failed' });
   }
@@ -1266,10 +1260,6 @@ app.patch('/api/admin/config', authenticate, requireAdmin, async (req, res) => {
 
 // Error handling
 app.use((err, req, res, next) => {
-  if (err.message === 'Database not configured') {
-    return res.status(503).json({ error: 'Database not configured - please configure database for production use' });
-  }
-
   console.error('Error:', err);
 
   if (err.code === '23505') { // Unique violation

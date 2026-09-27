@@ -2,39 +2,36 @@ import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { loadFallbackData, saveFallbackData } from './fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Check if database is configured
-const isDbConfigured = process.env.DB_HOST && process.env.DB_NAME && process.env.DB_USER;
-
 // Database connection pool configuration
-const pool = isDbConfigured ? new pg.Pool({
-  host: process.env.DB_HOST || 'localhost',
+const pool = new pg.Pool({
+  host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'capitol',
-  user: process.env.DB_USER || 'postgres',
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   max: 20, // Maximum pool size
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-}) : null;
+  connectionTimeoutMillis: 10000,
+});
 
 // Run migrations on startup
 async function runMigrations() {
-  if (!pool) {
-    console.log('Database not configured, skipping migrations');
-    return;
-  }
-
   try {
-    // Check if database is accessible
-    try {
-      await pool.query('SELECT 1');
-    } catch (error) {
-      console.log('Database not accessible, skipping migrations');
-      return;
+    // Wait for database to be ready with retries
+    let retries = 5;
+    while (retries > 0) {
+      try {
+        await pool.query('SELECT 1');
+        break;
+      } catch (error) {
+        retries--;
+        if (retries === 0) throw error;
+        console.log(`Database not ready, retrying... (${retries} attempts left)`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
 
     const migrationPath = path.join(__dirname, 'migrations');
@@ -45,7 +42,7 @@ async function runMigrations() {
     for (const file of migrationFiles) {
       const filePath = path.join(migrationPath, file);
       const migrationSQL = fs.readFileSync(filePath, 'utf8');
-      
+
       try {
         await pool.query(migrationSQL);
         console.log(`Migration ${file} executed successfully`);
@@ -66,62 +63,38 @@ async function runMigrations() {
 
 // Database query helper with error handling
 async function query(text, params) {
-  if (!pool) {
-    console.log('Database not configured, using fallback storage');
-    return { rows: [], rowCount: 0 };
-  }
-
   const start = Date.now();
   try {
     const result = await pool.query(text, params);
     const duration = Date.now() - start;
-    console.log('Executed query', { text, duration, rows: result.rowCount });
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Executed query', { text, duration, rows: result.rowCount });
+    }
     return result;
   } catch (error) {
     console.error('Database query error:', error);
-    // If database is not accessible, return empty result
-    if (error.code === 'ECONNREFUSED') {
-      console.log('Database not accessible, returning empty result');
-      return { rows: [], rowCount: 0 };
-    }
     throw error;
   }
 }
 
 // Transaction helper
 async function transaction(callback) {
-  if (!pool) {
-    console.log('Database not configured, transaction failed');
-    throw new Error('Database not configured');
-  }
-
+  const client = await pool.connect();
   try {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
   } catch (error) {
-    if (error.code === 'ECONNREFUSED') {
-      console.log('Database not accessible, transaction failed');
-      throw error;
-    }
+    await client.query('ROLLBACK');
     throw error;
+  } finally {
+    client.release();
   }
 }
 
 // Health check
 async function healthCheck() {
-  if (!pool) {
-    return { ok: true, database: 'not_configured' };
-  }
   try {
     await pool.query('SELECT 1');
     return { ok: true, database: 'connected' };
@@ -132,10 +105,8 @@ async function healthCheck() {
 
 // Graceful shutdown
 async function shutdown() {
-  if (pool) {
-    await pool.end();
-    console.log('Database pool closed');
-  }
+  await pool.end();
+  console.log('Database pool closed');
 }
 
 export { pool, query, transaction, runMigrations, healthCheck, shutdown };
