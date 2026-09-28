@@ -43,10 +43,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3001);
 const app = express();
 
-// Trust proxy for rate limiting - only trust specific proxies in production
-if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1); // Trust first proxy (Vercel)
-}
+// Trust proxy for rate limiting - always trust proxy for development/production
+app.set('trust proxy', 1);
 
 // Middleware
 app.use(securityHeaders);
@@ -54,6 +52,18 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '12mb' }));
 app.use(requestLogger);
 app.use(rateLimiter);
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
+  maxAge: '1y', // Cache for 1 year
+  etag: true,
+  setHeaders: (res, filePath) => {
+    // Set appropriate headers for images
+    if (filePath.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+      res.setHeader('Content-Type', 'image/jpeg');
+    }
+  }
+}));
 
 // File upload configuration
 const upload = multer({
@@ -170,19 +180,25 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   const { displayName, username, email, password } = req.body || {};
   
+  console.log('[Signup] Request received', { username, email, hasPassword: !!password });
+  
   if (!displayName || !username || !email || !password) {
+    console.log('[Signup] Missing fields');
     return res.status(400).json({ error: 'Missing fields' });
   }
   
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+    console.log('[Signup] Invalid username format');
     return res.status(400).json({ error: 'Invalid username' });
   }
   
   if (String(password).length < 6) {
+    console.log('[Signup] Password too short');
     return res.status(400).json({ error: 'Password must be 6+ characters' });
   }
 
   try {
+    console.log('[Signup] Starting moderation check');
     // Moderate username
     const usernameResult = await moderateContent({
       userId: null, // No user ID yet during signup
@@ -192,6 +208,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
     });
     
     if (!usernameResult.allowed) {
+      console.log('[Signup] Username moderation failed', { action: usernameResult.action });
       return res.status(400).json({
         error: 'Username violates community guidelines',
         moderation: {
@@ -201,6 +218,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
       });
     }
 
+    console.log('[Signup] Starting database transaction');
     const result = await transaction(async (client) => {
       // Check if username exists
       const existingUser = await client.query(
@@ -208,6 +226,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         [username]
       );
       if (existingUser.rows.length > 0) {
+        console.log('[Signup] Username already taken');
         throw Object.assign(new Error('Username already taken'), { status: 409 });
       }
 
@@ -217,10 +236,12 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         [email.toLowerCase()]
       );
       if (existingEmail.rows.length > 0) {
+        console.log('[Signup] Email already registered');
         throw Object.assign(new Error('Email already registered'), { status: 409 });
       }
 
       const id = uid();
+      console.log('[Signup] Generating user ID', { id });
       const passwordHash = await hashPassword(password);
       const now = new Date().toISOString();
       const invite = username.toUpperCase().slice(0, 4) + crypto.randomBytes(2).toString('hex').toUpperCase();
@@ -231,6 +252,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         avatarHash = (avatarHash * 31 + char.charCodeAt(0)) >>> 0;
       }
 
+      console.log('[Signup] Inserting user into database');
       await client.query(
         `INSERT INTO users (
           id, username, email, display_name, password_hash,
@@ -255,6 +277,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         ]
       );
 
+      console.log('[Signup] Creating session');
       // Create session within the same transaction
       const token = generateToken(id);
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
@@ -265,12 +288,16 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         [token, id, expiresAt, req.ip, req.headers['user-agent']]
       );
       
+      console.log('[Signup] Fetching created user');
       const userResult = await client.query('SELECT * FROM users WHERE id = $1', [id]);
+      console.log('[Signup] User created successfully', { id, username });
       return { token, user: selfUser(userResult.rows[0]) };
     });
 
+    console.log('[Signup] Sending response');
     res.json(result);
   } catch (e) {
+    console.error('[Signup] Error:', e);
     res.status(e.status || 500).json({ error: e.message || 'Signup failed' });
   }
 });
@@ -547,6 +574,51 @@ app.get('/api/rooms/:id', optionalAuth, async (req, res) => {
     },
     membership
   });
+});
+
+// Get user's current active room
+app.get('/api/users/me/room', authenticate, async (req, res) => {
+  try {
+    const memberResult = await query(
+      `SELECT rm.*, r.*, 
+       (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = rm.room_id AND rm2.status = 'active') as member_count
+       FROM room_members rm
+       JOIN rooms r ON rm.room_id = r.id
+       WHERE rm.user_id = $1 AND rm.status = 'active'`,
+      [req.user.id]
+    );
+
+    if (memberResult.rows.length === 0) {
+      return res.json({ room: null });
+    }
+
+    const member = memberResult.rows[0];
+    res.json({
+      room: {
+        id: member.room_id,
+        name: member.name,
+        icon: member.icon || 'bolt',
+        goal: member.goal || '',
+        niche: member.niche || 'general',
+        age_range: member.age_range || null,
+        tags: member.tags || [],
+        max_members: member.max_members || 8,
+        member_count: parseInt(member.member_count) || 0,
+        elite: !!member.elite,
+        days: member.days || 30,
+        created_at: member.created_at,
+        creator_uid: member.creator_uid || null,
+      },
+      membership: {
+        id: member.id,
+        status: member.status,
+        joined_at: member.joined_at
+      }
+    });
+  } catch (e) {
+    console.error('Get user room error:', e);
+    res.status(500).json({ error: 'Failed to get user room' });
+  }
 });
 
 app.post('/api/rooms', authenticate, async (req, res) => {
@@ -1061,11 +1133,13 @@ app.post('/api/images/upload', authenticate, upload.single('image'), async (req,
 
   try {
     const key = storage.generateKey(req.file.originalname);
+    console.log('[Image Upload] Starting upload', { key, mimetype: req.file.mimetype, size: req.file.size });
     const url = await storage.uploadFile(req.file, key);
+    console.log('[Image Upload] Upload completed', { key, url: url.substring(0, 50) + '...' });
     res.json({ url });
   } catch (e) {
-    console.error('Image upload error:', e);
-    res.status(500).json({ error: 'Image upload failed' });
+    console.error('[Image Upload] Upload failed:', e);
+    res.status(500).json({ error: e.message || 'Image upload failed' });
   }
 });
 

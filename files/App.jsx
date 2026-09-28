@@ -3,7 +3,7 @@ import {
   _getUsersStore, _saveUsersStore,
   fbSignup, fbLogin, fbLogout, fbDeleteAccount, fbCheckUserId,
   fbGetUser, fbGetAllUsers, fbUpdateUser,
-  fbGetRooms, fbGetRoomById, fbCreateRoom,
+  fbGetRooms, fbGetRoomById, fbGetMyRoom, fbCreateRoom,
   fbGetJoinCooldown, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbSubmitProof, fbGetProofs,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
@@ -8686,7 +8686,8 @@ function EditProfileModal({ open, onClose, profile, onSave }) {
     setUploadingPfp(true);
     try {
       const url = await uploadFile(f);
-      if (!url || url.startsWith("blob:") || url.startsWith("data:")) throw new Error("The uploaded image URL was invalid.");
+      if (!url || url.startsWith("blob:")) throw new Error("The uploaded image URL was invalid.");
+      // Accept both filesystem paths and data URLs for compatibility
       await verifyImageUrl(url);
       console.info("[Capitol upload] switching profile image to permanent URL", url);
       photoPreview.reset(url);
@@ -8706,7 +8707,8 @@ function EditProfileModal({ open, onClose, profile, onSave }) {
     setUploadingCover(true);
     try {
       const url = await uploadFile(f);
-      if (!url || url.startsWith("blob:") || url.startsWith("data:")) throw new Error("The uploaded image URL was invalid.");
+      if (!url || url.startsWith("blob:")) throw new Error("The uploaded image URL was invalid.");
+      // Accept both filesystem paths and data URLs for compatibility
       await verifyImageUrl(url);
       console.info("[Capitol upload] switching banner to permanent URL", url);
       coverPreview.reset(url);
@@ -9976,23 +9978,33 @@ function LandingPage({ onEnter }) {
     if (authPass.length < 6) { setAuthError("Password must be 6+ characters"); return; }
     if (authLoading) return; // prevent double-submit
     setAuthLoading(true);
-    const checkResult = await fbCheckUserId(authUserId.trim());
-    if (checkResult.taken) { setAuthLoading(false); setAuthError("That User ID is already taken — choose another"); return; }
-    const joinedDate = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
-    const result = await fbSignup({
-      displayName: authName.trim(),
-      userId:      authUserId.trim(),
-      email:       authEmail.trim().toLowerCase(),
-      password:    authPass,
-      joinedDate,
-    });
-    setAuthLoading(false);
-    if (!result.ok) { setAuthError(result.error || "Signup failed"); return; }
-    const newUser = { ...result.user, displayName:authName.trim(), userId:authUserId.trim(), email:authEmail.trim(), joinedDate };
-    setPendingUser(newUser);
-    // Continue into split-screen onboarding (same layout as auth)
-    setPendingUser(newUser);
-    setScreen("onboarding");
+    try {
+      console.log('[Signup] Starting signup process', { userId: authUserId.trim(), email: authEmail.trim() });
+      const checkResult = await fbCheckUserId(authUserId.trim());
+      if (checkResult.taken) { setAuthLoading(false); setAuthError("That User ID is already taken — choose another"); return; }
+      const joinedDate = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
+      console.log('[Signup] Calling fbSignup API');
+      const result = await fbSignup({
+        displayName: authName.trim(),
+        userId:      authUserId.trim(),
+        email:       authEmail.trim().toLowerCase(),
+        password:    authPass,
+        joinedDate,
+      });
+      console.log('[Signup] fbSignup result', { ok: result.ok, error: result.error, hasUser: !!result.user });
+      setAuthLoading(false);
+      if (!result.ok) { setAuthError(result.error || "Signup failed"); return; }
+      const newUser = { ...result.user, displayName:authName.trim(), userId:authUserId.trim(), email:authEmail.trim(), joinedDate };
+      console.log('[Signup] User created successfully', { uid: newUser.uid, userId: newUser.userId });
+      setPendingUser(newUser);
+      // Continue into split-screen onboarding (same layout as auth)
+      setPendingUser(newUser);
+      setScreen("onboarding");
+    } catch (error) {
+      console.error('[Signup] Signup error:', error);
+      setAuthLoading(false);
+      setAuthError(error.message || "Signup failed due to network error");
+    }
   }
 
   // ── ONBOARDING COMPLETE ────────────────────────────────────────────────────
@@ -13898,6 +13910,21 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
         return still ? prev : null;
       });
     }).catch(() => {});
+  }, [uid]);
+
+  // ── Load user's current active room from backend ─────────────────────────
+  // This ensures the dashboard always shows the correct room membership from the database
+  // rather than relying solely on localStorage which can get out of sync
+  useEffect(() => {
+    if (!uid) return;
+    fbGetMyRoom().then(result => {
+      if (result?.room?.id) {
+        console.log('[App] Found active room from backend', { roomId: result.room.id });
+        setJoinedRoomId(String(result.room.id));
+      }
+    }).catch(() => {
+      console.log('[App] No active room found from backend');
+    });
   }, [uid]);
 
   // ── Load proof history ────────────────────────────────────────────────────

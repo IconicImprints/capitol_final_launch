@@ -66,19 +66,17 @@ async function uploadFile(file) {
   if (!res.ok || !data.url) throw new Error(data.error || "Image upload failed.");
   console.info("[Capitol upload] upload result", data);
   const imageUrl = String(data.url);
-  // For serverless deployment, we accept data URLs as they work without persistent storage
-  // For local development with filesystem, we still convert to relative paths
+  // Accept filesystem paths (/uploads/filename.ext) and data URLs
   if (imageUrl.startsWith("blob:")) {
     throw new Error("The server returned a temporary image URL.");
   }
-  // Accept data URLs for serverless, convert filesystem paths to relative
-  if (imageUrl.startsWith("data:")) {
-    return imageUrl; // Return data URL as-is for serverless
+  // Return the URL as-is if it's already a full path or data URL
+  if (imageUrl.startsWith("/") || imageUrl.startsWith("data:")) {
+    console.info("[Capitol upload] returning permanent URL", { url: imageUrl });
+    return imageUrl;
   }
-  // Keep storage paths relative so they use the same origin as the app. The
-  // Vite dev/preview proxy and the production reverse proxy both forward
-  // /uploads to the backend, avoiding browser-inaccessible localhost URLs.
-  const permanentUrl = imageUrl.startsWith("/") ? imageUrl : new URL(imageUrl, _apiOrigin()).pathname;
+  // Otherwise construct a relative path from the API origin
+  const permanentUrl = new URL(imageUrl, _apiOrigin()).pathname;
   console.info("[Capitol upload] storage path and generated URL", { storagePath: imageUrl, url: permanentUrl });
   return permanentUrl;
 }
@@ -155,7 +153,7 @@ async function fbSignup({ displayName, userId, email, password, joinedDate }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || userId);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    await _supabaseSignIn(email, password);
+    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(res.user);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("signup_success");
@@ -197,8 +195,7 @@ async function fbSignup({ displayName, userId, email, password, joinedDate }) {
     localStorage.setItem("kd_token", token);
     localStorage.setItem("kd_current_uid", id);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(newUser)));
-    await _supabaseSignUp(email, password, { username: userId, display_name: displayName });
-    await _supabaseSignIn(email, password);
+    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(newUser);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("signup_success");
@@ -212,7 +209,7 @@ async function fbLogin({ email, password }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || res.user?.username || "");
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    await _supabaseSignIn(email, password);
+    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(res.user);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("login_success");
@@ -225,7 +222,7 @@ async function fbLogin({ email, password }) {
     localStorage.setItem("kd_token", token);
     localStorage.setItem("kd_current_uid", user.id || user.username);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(user)));
-    await _supabaseSignIn(email, password);
+    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(user);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("login_success");
@@ -481,6 +478,15 @@ async function fbGetRoomById(roomId) {
     return res;
   } catch (e) {
     return { error: e.message };
+  }
+}
+
+async function fbGetMyRoom() {
+  try {
+    const res = await _apiGet("/api/users/me/room");
+    return res;
+  } catch (e) {
+    return { room: null, error: e.message };
   }
 }
 
@@ -1110,7 +1116,7 @@ export {
   _getUsersStore, _saveUsersStore,
   fbSignup, fbLogin, fbLogout, fbDeleteAccount, fbCheckUserId,
   fbGetUser, fbGetAllUsers, fbUpdateUser,
-  fbGetRooms, fbGetRoomById, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,
+  fbGetRooms, fbGetRoomById, fbGetMyRoom, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbGetProofs, fbSubmitProof,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
   fbGetLeaderboard,

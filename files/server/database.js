@@ -12,6 +12,13 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 // Support both Vercel Supabase variables and custom DB_* variables
 const connectionString = process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL;
 
+if (!connectionString) {
+  console.error('❌ CRITICAL: No PostgreSQL connection string found.');
+  console.error('❌ Set POSTGRES_URL, POSTGRES_URL_NON_POOLING, or POSTGRES_PRISMA_URL environment variable.');
+  console.error('❌ The application cannot function without a database connection.');
+  throw new Error('Database connection string is required. Set POSTGRES_URL environment variable.');
+}
+
 const pool = new pg.Pool({
   connectionString,
   max: 20, // Maximum pool size
@@ -22,17 +29,22 @@ const pool = new pg.Pool({
 // Run migrations on startup
 async function runMigrations() {
   try {
+    console.log('[Database] Starting migrations...');
     // Wait for database to be ready with retries
-    let retries = 5;
+    let retries = 10;
     while (retries > 0) {
       try {
         await pool.query('SELECT 1');
+        console.log('[Database] Database connection established');
         break;
       } catch (error) {
         retries--;
-        if (retries === 0) throw error;
-        console.log(`Database not ready, retrying... (${retries} attempts left)`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (retries === 0) {
+          console.error('[Database] Failed to connect to database after retries:', error.message);
+          throw error;
+        }
+        console.log(`[Database] Database not ready, retrying... (${retries} attempts left)`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
@@ -41,30 +53,27 @@ async function runMigrations() {
       .filter(f => f.endsWith('.sql'))
       .sort();
 
+    console.log(`[Database] Found ${migrationFiles.length} migration files`);
+
     for (const file of migrationFiles) {
       const filePath = path.join(migrationPath, file);
       const migrationSQL = fs.readFileSync(filePath, 'utf8');
 
       try {
         await pool.query(migrationSQL);
-        console.log(`Migration ${file} executed successfully`);
+        console.log(`[Database] Migration ${file} executed successfully`);
       } catch (error) {
         // Ignore "already exists" errors
-        if (!error.message.includes('already exists') && !error.message.includes('duplicate')) {
-          console.error(`Migration ${file} failed:`, error.message);
+        if (!error.message.includes('already exists') && !error.message.includes('duplicate') && !error.message.includes('relation')) {
+          console.error(`[Database] Migration ${file} failed:`, error.message);
           throw error;
         }
+        console.log(`[Database] Migration ${file} skipped (already exists)`);
       }
     }
-    console.log('All migrations completed');
+    console.log('[Database] All migrations completed successfully');
   } catch (error) {
-    console.error('Migration error:', error);
-    // In development, continue without database if it's not available
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('⚠️  Continuing without database connection in development mode');
-      console.warn('⚠️  API will return mock responses for database-dependent endpoints');
-      return;
-    }
+    console.error('[Database] Migration error:', error);
     throw error;
   }
 }
@@ -76,16 +85,12 @@ async function query(text, params) {
     const result = await pool.query(text, params);
     const duration = Date.now() - start;
     if (process.env.NODE_ENV !== 'production') {
-      console.log('Executed query', { text, duration, rows: result.rowCount });
+      console.log('[Database] Query executed', { text: text.substring(0, 50), duration, rows: result.rowCount });
     }
     return result;
   } catch (error) {
-    console.error('Database query error:', error);
-    // In development without database, return empty results for read queries
-    if (process.env.NODE_ENV !== 'production' && error.code === 'ECONNREFUSED') {
-      console.warn('⚠️  Database not connected, returning empty result for development');
-      return { rows: [], rowCount: 0 };
-    }
+    console.error('[Database] Query error:', error.message);
+    console.error('[Database] Failed query:', text.substring(0, 100));
     throw error;
   }
 }
