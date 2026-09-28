@@ -1,2 +1,13 @@
 .vercel
 .env*
+!.env.example
+
+# Security: Never track secret files
+.env.local
+.env.*.local
+*.secret
+*.key
+*.credentials
+*_secret.*
+*_key.*
+*_credentials.*

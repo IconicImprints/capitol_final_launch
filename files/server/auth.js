@@ -3,15 +3,21 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { query } from './database.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SUPABASE_JWT_SECRET || (process.env.NODE_ENV !== 'production' ? 'dev-secret-key-do-not-use-in-production' : null);
+// JWT Secret Configuration
+const JWT_SECRET = process.env.JWT_SECRET || process.env.SUPABASE_JWT_SECRET;
 const JWT_EXPIRES_IN = '7d';
 
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET environment variable is required in production');
+// Production requires JWT_SECRET - fail fast if missing
+if (process.env.NODE_ENV === 'production' && !JWT_SECRET) {
+  throw new Error('CRITICAL: JWT_SECRET environment variable is required in production. Server cannot start without it.');
 }
 
-if (process.env.NODE_ENV !== 'production' && !process.env.JWT_SECRET) {
-  console.warn('⚠️  Using development JWT_SECRET. Set JWT_SECRET environment variable for production.');
+// Development fallback with clear warning
+let effectiveJWTSecret = JWT_SECRET;
+if (!effectiveJWTSecret && process.env.NODE_ENV !== 'production') {
+  console.warn('⚠️  SECURITY WARNING: Using insecure development JWT_SECRET fallback.');
+  console.warn('⚠️  This MUST be replaced with a proper JWT_SECRET in production.');
+  effectiveJWTSecret = 'dev-secret-key-do-not-use-in-production-insecure';
 }
 
 // Password hashing with bcrypt
@@ -29,7 +35,7 @@ export async function verifyPassword(password, hash) {
 export function generateToken(userId) {
   return jwt.sign(
     { userId },
-    JWT_SECRET,
+    effectiveJWTSecret,
     { expiresIn: JWT_EXPIRES_IN }
   );
 }
@@ -37,7 +43,7 @@ export function generateToken(userId) {
 // Verify JWT token
 export function verifyToken(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, effectiveJWTSecret);
   } catch (error) {
     return null;
   }

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +19,35 @@ class StorageProvider {
     this.secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
     this.endpoint = process.env.S3_ENDPOINT;
     
+    // Initialize S3 client if credentials are available
+    this.s3Client = null;
+    if (this.provider === 's3' && this.accessKeyId && this.secretAccessKey && this.accessKeyId !== 'placeholder') {
+      try {
+        const s3Config = {
+          region: this.region,
+          credentials: {
+            accessKeyId: this.accessKeyId,
+            secretAccessKey: this.secretAccessKey,
+          },
+        };
+        
+        // Add custom endpoint if provided (for S3-compatible services)
+        if (this.endpoint) {
+          s3Config.endpoint = this.endpoint;
+        }
+        
+        this.s3Client = new S3Client(s3Config);
+        console.log('[Storage] S3 client initialized');
+      } catch (error) {
+        console.error('[Storage] Failed to initialize S3 client:', error);
+        console.warn('[Storage] Falling back to local filesystem storage');
+        this.provider = 'local';
+      }
+    } else if (this.provider === 's3') {
+      console.warn('[Storage] S3 credentials not properly configured, using local filesystem storage');
+      this.provider = 'local';
+    }
+    
     // Ensure upload directory exists for local storage
     this.uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
     if (this.provider === 'local') {
@@ -31,19 +61,13 @@ class StorageProvider {
       }
     }
     
-    // Force local storage if S3 credentials are not properly configured
-    if (this.provider === 's3' && (!this.accessKeyId || !this.secretAccessKey || this.accessKeyId === 'placeholder')) {
-      console.warn('[Storage] S3 credentials not properly configured, using local filesystem storage');
-      this.provider = 'local';
-    }
-    
     console.log('[Storage] Initialized with provider:', this.provider, 'uploadDir:', this.uploadDir);
   }
 
   async uploadFile(file, key) {
     console.log('[Storage] Starting file upload', { key, mimetype: file.mimetype, size: file.size });
     
-    if (this.provider === 's3') {
+    if (this.provider === 's3' && this.s3Client) {
       return this.uploadToS3(file, key);
     } else {
       return this.uploadToLocal(file, key);
@@ -51,23 +75,27 @@ class StorageProvider {
   }
 
   async uploadToS3(file, key) {
-    // For production, this would use AWS SDK or similar
-    // For now, we'll implement a simple version that can be extended
-    // This is a placeholder - actual S3 implementation would require aws-sdk package
-    
-    if (!this.accessKeyId || !this.secretAccessKey || this.accessKeyId === 'placeholder') {
-      console.warn('[Storage] S3 credentials not configured, falling back to local filesystem');
+    try {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      
+      const command = new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: file.mimetype,
+      });
+      
+      await this.s3Client.send(command);
+      
+      // Return S3 public URL
+      const publicUrl = `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
+      console.log('[Storage] File uploaded to S3', { key, size: buffer.length, publicUrl });
+      return publicUrl;
+    } catch (error) {
+      console.error('[Storage] S3 upload failed:', error);
+      console.warn('[Storage] Falling back to local filesystem storage');
       return this.uploadToLocal(file, key);
     }
-
-    // Placeholder: In production, use AWS SDK
-    // const AWS = require('aws-sdk');
-    // const s3 = new AWS.S3({ ... });
-    // await s3.putObject({ Bucket: this.bucket, Key: key, Body: file }).promise();
-    
-    // For now, fall back to local
-    console.warn('[Storage] S3 upload not fully implemented, falling back to local filesystem');
-    return this.uploadToLocal(file, key);
   }
 
   async uploadToLocal(file, key) {
@@ -89,7 +117,7 @@ class StorageProvider {
   }
 
   async deleteFile(key) {
-    if (this.provider === 's3') {
+    if (this.provider === 's3' && this.s3Client) {
       return this.deleteFromS3(key);
     } else {
       return this.deleteFromLocal(key);
@@ -97,8 +125,17 @@ class StorageProvider {
   }
 
   async deleteFromS3(key) {
-    // Placeholder for S3 deletion
-    console.warn('[Storage] S3 deletion not fully implemented');
+    try {
+      const command = new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      });
+      
+      await this.s3Client.send(command);
+      console.log('[Storage] File deleted from S3', { key });
+    } catch (error) {
+      console.error('[Storage] S3 deletion failed:', error);
+    }
   }
 
   async deleteFromLocal(key) {

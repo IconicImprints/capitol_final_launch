@@ -48,7 +48,19 @@ app.set('trust proxy', 1);
 
 // Middleware
 app.use(securityHeaders);
-app.use(cors({ origin: true, credentials: true }));
+
+// CORS configuration - restrict to specific origins in production
+const corsOrigin = process.env.NODE_ENV === 'production' 
+  ? (process.env.ALLOWED_ORIGINS?.split(',') || ['https://yourdomain.com'])
+  : true; // Allow all origins in development
+
+app.use(cors({ 
+  origin: corsOrigin, 
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json({ limit: '12mb' }));
 app.use(requestLogger);
 app.use(rateLimiter);
@@ -157,17 +169,19 @@ function calcLevel(xp) {
 
 // Centralized XP update
 async function updateUserXP(client, userId, amount, reason = 'unknown') {
-  const newXP = await client.query(
-    `UPDATE users 
+  const key = `xp_${reason}_${new Date().toISOString().slice(0, 10)}`;
+  const updated = await client.query(
+    `UPDATE users
      SET xp = GREATEST(0, xp + $1),
-         level = $2,
-         xp_awarded_keys = COALESCE(xp_awarded_keys, '{}'::jsonb) || jsonb_build_object($3, $4)
-     WHERE id = $5
-     RETURNING xp, level, xp_awarded_keys`,
-    [amount, calcLevel(amount), `xp_${reason}_${new Date().toISOString().slice(0, 10)}`, true, userId]
+         xp_awarded_keys = COALESCE(xp_awarded_keys, '{}'::jsonb) || jsonb_build_object($2::text, to_jsonb($3::boolean))
+     WHERE id = $4
+     RETURNING xp`,
+    [amount, key, true, userId]
   );
-  
-  return newXP.rows[0];
+  const xp = updated.rows[0]?.xp ?? 0;
+  const level = calcLevel(xp);
+  await client.query(`UPDATE users SET level = $1 WHERE id = $2`, [level, userId]);
+  return { xp, level, xp_awarded_keys: updated.rows[0]?.xp_awarded_keys };
 }
 
 // ── Health Check ─────────────────────────────────────────────────────────────
@@ -244,7 +258,11 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
       console.log('[Signup] Generating user ID', { id });
       const passwordHash = await hashPassword(password);
       const now = new Date().toISOString();
-      const invite = username.toUpperCase().slice(0, 4) + crypto.randomBytes(2).toString('hex').toUpperCase();
+      
+      // Generate invite code - use timestamp + random to ensure uniqueness
+      const timestamp = Date.now().toString(36).toUpperCase();
+      const random = crypto.randomBytes(3).toString('hex').toUpperCase();
+      const invite = username.toUpperCase().slice(0, 4) + timestamp + random;
       
       const palette = ['#F5C800', '#A7D8DE', '#C4B5FD', '#F9A8D4', '#86EFAC', '#FDBA74'];
       let avatarHash = 0;
@@ -269,11 +287,15 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
         [
           id, username, email.toLowerCase(), displayName.trim(), passwordHash,
           JSON.stringify({ background: palette[avatarHash % palette.length], letter: username[0].toUpperCase() }),
-          now, now, 0, 1, 0, 0, 0, false, 'ok', false,
-          0, 0, 0, now, 0, 0, 'bronze', false,
-          null, 0, 0, null, false, false,
-          '', '', null, false, null, false,
-          0, null, '[]', false, '{}'
+          now, now,
+          0, 1, 0, 0, 0, false, 'ok', false,
+          0, 0, 0, now,
+          0, 0, 'bronze', false,
+          null, 0, 0, null,
+          false, false,
+          '', '', null, false,
+          null, invite, 0, null,
+          '[]', false, '{}'
         ]
       );
 
@@ -488,10 +510,10 @@ app.get('/api/rooms', optionalAuth, async (req, res) => {
     niche: r.niche || 'general',
     age_range: r.age_range || null,
     tags: r.tags || [],
-    max_members: r.max_members || 8,
-    member_count: parseInt(r.member_count) || 0,
+    max_members: parseInt(r.max_members) || 8,
+    member_count: Math.floor(parseInt(r.member_count) || 0),
     elite: !!r.elite,
-    days: r.days || 30,
+    days: parseInt(r.days) || 30,
     created_at: r.created_at,
     creator_uid: r.creator_uid || null,
   }));
@@ -519,35 +541,6 @@ app.get('/api/rooms/:id', optionalAuth, async (req, res) => {
 
     if (memberResult.rows.length > 0) {
       membership = 'active';
-    } else {
-      // Check if user was kicked
-      const userResult = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-      const user = userResult.rows[0];
-      
-      if (user && user.kicked_from_room && user.kick_status !== 'ok') {
-        membership = 'kicked';
-        return res.json({
-          room: {
-            id: room.id,
-            name: room.name,
-            icon: room.icon || 'bolt',
-            goal: room.goal || '',
-            niche: room.niche || 'general',
-            age_range: room.age_range || null,
-            tags: room.tags || [],
-            max_members: room.max_members || 8,
-            member_count: 0,
-            elite: !!room.elite,
-            days: room.days || 30,
-            created_at: room.created_at,
-            creator_uid: room.creator_uid || null,
-          },
-          membership: 'kicked',
-          kickStatus: user.kick_status,
-          kickReason: user.kick_status === 'inactive' ? 'Inactive for 3+ days' : 'Removed from room',
-          burnedAt: user.burned_at
-        });
-      }
     }
   }
 
@@ -565,10 +558,10 @@ app.get('/api/rooms/:id', optionalAuth, async (req, res) => {
       niche: room.niche || 'general',
       age_range: room.age_range || null,
       tags: room.tags || [],
-      max_members: room.max_members || 8,
-      member_count: parseInt(memberCountResult.rows[0].count) || 0,
+      max_members: parseInt(room.max_members) || 8,
+      member_count: Math.floor(parseInt(memberCountResult.rows[0].count) || 0),
       elite: !!room.elite,
-      days: room.days || 30,
+      days: parseInt(room.days) || 30,
       created_at: room.created_at,
       creator_uid: room.creator_uid || null,
     },
@@ -602,10 +595,10 @@ app.get('/api/users/me/room', authenticate, async (req, res) => {
         niche: member.niche || 'general',
         age_range: member.age_range || null,
         tags: member.tags || [],
-        max_members: member.max_members || 8,
-        member_count: parseInt(member.member_count) || 0,
+        max_members: parseInt(member.max_members) || 8,
+        member_count: Math.floor(parseInt(member.member_count) || 0),
         elite: !!member.elite,
-        days: member.days || 30,
+        days: parseInt(member.days) || 30,
         created_at: member.created_at,
         creator_uid: member.creator_uid || null,
       },
@@ -628,6 +621,13 @@ app.post('/api/rooms', authenticate, async (req, res) => {
     const result = await transaction(async (client) => {
       const id = rid('room');
       const now = new Date().toISOString();
+
+      // One active membership per user — leave any current rooms before creating
+      await client.query(
+        `UPDATE room_members SET status = 'left', left_at = NOW()
+         WHERE user_id = $1 AND status = 'active'`,
+        [req.user.id]
+      );
 
       await client.query(
         `INSERT INTO rooms (id, name, icon, goal, niche, age_range, tags, max_members, elite, days, created_at, creator_uid, status)
@@ -670,10 +670,10 @@ app.post('/api/rooms', authenticate, async (req, res) => {
         niche: roomResult.rows[0].niche || 'general',
         age_range: roomResult.rows[0].age_range || null,
         tags: roomResult.rows[0].tags || [],
-        max_members: roomResult.rows[0].max_members || 8,
-        member_count: parseInt(memberCountResult.rows[0].count) || 0,
+        max_members: parseInt(roomResult.rows[0].max_members) || 8,
+        member_count: Math.floor(parseInt(memberCountResult.rows[0].count) || 0),
         elite: !!roomResult.rows[0].elite,
-        days: roomResult.rows[0].days || 30,
+        days: parseInt(roomResult.rows[0].days) || 30,
         created_at: roomResult.rows[0].created_at,
         creator_uid: roomResult.rows[0].creator_uid || null,
       }
@@ -687,7 +687,11 @@ app.post('/api/rooms', authenticate, async (req, res) => {
 app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
   try {
     await transaction(async (client) => {
-      const roomResult = await client.query('SELECT * FROM rooms WHERE id = $1', [req.params.id]);
+      // Lock room row so capacity checks are race-safe under concurrent joins
+      const roomResult = await client.query(
+        'SELECT * FROM rooms WHERE id = $1 FOR UPDATE',
+        [req.params.id]
+      );
       
       if (roomResult.rows.length === 0) {
         throw Object.assign(new Error('Room not found'), { status: 404 });
@@ -702,11 +706,11 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
       );
 
       if (currentActiveMember.rows.length > 0) {
-        // User is already in this room - just return success
-        return res.json({ ok: true, alreadyInRoom: true });
+        // User is already in this room - throw a special error to handle this case
+        throw Object.assign(new Error('Already in room'), { status: 409, alreadyInRoom: true });
       }
 
-      // Check capacity
+      // Capacity applies to all non-active joins (including leave/kick rejoins)
       const memberCount = await client.query(
         `SELECT COUNT(*) as count FROM room_members WHERE room_id = $1 AND status = 'active'`,
         [room.id]
@@ -716,38 +720,27 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
         throw Object.assign(new Error('Room is full'), { status: 400 });
       }
 
-      // Leave other active rooms
+      // One active membership per user
       await client.query(
-        `UPDATE room_members SET status = 'left', left_at = NOW() 
-         WHERE user_id = $1 AND status = 'active'`,
-        [req.user.id]
+        `UPDATE room_members SET status = 'left', left_at = NOW()
+         WHERE user_id = $1 AND status = 'active' AND room_id <> $2`,
+        [req.user.id, room.id]
       );
 
-      // Check if user has a previous entry in this room (rejoining)
-      const existingMember = await client.query(
-        `SELECT * FROM room_members WHERE room_id = $1 AND user_id = $2`,
-        [room.id, req.user.id]
+      // Upsert membership: rejoin after kick/leave, or insert new. Race-safe via ON CONFLICT.
+      await client.query(
+        `INSERT INTO room_members (id, room_id, user_id, status, joined_at)
+         VALUES ($1, $2, $3, 'active', $4)
+         ON CONFLICT (room_id, user_id) DO UPDATE
+         SET status = 'active', joined_at = EXCLUDED.joined_at, left_at = NULL`,
+        [rid('rm'), room.id, req.user.id, new Date().toISOString()]
       );
 
-      if (existingMember.rows.length > 0) {
-        await client.query(
-          `UPDATE room_members SET status = 'active', joined_at = NOW(), left_at = NULL 
-           WHERE id = $1`,
-          [existingMember.rows[0].id]
-        );
-      } else {
-        const memberId = rid('rm');
-        await client.query(
-          `INSERT INTO room_members (id, room_id, user_id, status, joined_at)
-           VALUES ($1, $2, $3, 'active', $4)`,
-          [memberId, room.id, req.user.id, new Date().toISOString()]
-        );
-      }
-
-      // Update user stats
+      // Clear stale user-level kick flags so dashboard/onboarding stay consistent
       await client.query(
-        `UPDATE users 
-         SET room_joined_at = $1, joined_rooms = joined_rooms + 1 
+        `UPDATE users
+         SET kicked_from_room = false, kick_status = 'ok', burned_at = NULL,
+             room_joined_at = $1, joined_rooms = joined_rooms + 1
          WHERE id = $2`,
         [new Date().toISOString(), req.user.id]
       );
@@ -755,6 +748,9 @@ app.post('/api/rooms/:id/join', authenticate, async (req, res) => {
 
     res.json({ ok: true });
   } catch (e) {
+    if (e.status === 409 && e.alreadyInRoom) {
+      return res.json({ ok: true, alreadyInRoom: true });
+    }
     res.status(e.status || 500).json({ error: e.message });
   }
 });
@@ -821,23 +817,42 @@ app.post('/api/rooms/:id/kick', authenticate, async (req, res) => {
         throw Object.assign(new Error('User not found'), { status: 404 });
       }
 
-      // Update room member status
+      // Update room member status to 'kicked'
       await client.query(
-        `UPDATE room_members SET status = 'kicked' 
+        `UPDATE room_members SET status = 'kicked', left_at = NOW() 
          WHERE room_id = $1 AND user_id = $2 AND status = 'active'`,
         [req.params.id, targetId]
       );
 
-      // Update user status
-      const kickReason = reason === 'inactive' ? 'inactive' : 'kicked';
+      // Clear target's active-room pointer so dashboard doesn't show a stale room
       await client.query(
-        `UPDATE users 
-         SET kicked_from_room = true, 
-             kick_status = $1, 
-             burned_at = NOW()
-         WHERE id = $2`,
-        [kickReason, targetId]
+        `UPDATE users SET room_joined_at = NULL WHERE id = $1`,
+        [targetId]
       );
+
+      // Manual kicks do not permanently block rejoin — room_members.status='kicked'
+      // is cleared when the user joins again. Inactivity kicks still set user flags.
+      if (reason === 'inactive') {
+        const kickReason = 'inactive';
+        await client.query(
+          `UPDATE users 
+           SET kicked_from_room = true, 
+               kick_status = $1, 
+               burned_at = NOW()
+           WHERE id = $2`,
+          [kickReason, targetId]
+        );
+      } else {
+        // For manual kicks, clear any previous inactivity status since this is a different room/situation
+        await client.query(
+          `UPDATE users 
+           SET kicked_from_room = false, 
+               kick_status = 'ok',
+               burned_at = NULL
+           WHERE id = $1`,
+          [targetId]
+        );
+      }
 
       // Apply XP penalty
       await updateUserXP(client, targetId, -20, 'kick_penalty');
@@ -846,7 +861,7 @@ app.post('/api/rooms/:id/kick', authenticate, async (req, res) => {
       const notifId = rid('notif');
       await client.query(
         `INSERT INTO notifications (id, user_id, type, read, created_at, data)
-         VALUES ($1, $2, 'kick', false, NOW(), $3)`,
+         VALUES ($1, $2, 'kick', false, NOW(), $3::jsonb)`,
         [notifId, targetId, JSON.stringify({
           reason: reason === 'inactive' ? 'Inactive for 3+ days' : 'Removed from room',
           roomId: req.params.id,
@@ -1793,10 +1808,17 @@ app.post('/api/admin/moderation/prohibited-term', authenticate, requireAdmin, as
   }
 });
 
-// Error handling
+// Error handling (production-safe)
 app.use((err, req, res, next) => {
-  console.error('Error:', err);
+  // Log error without exposing sensitive data
+  console.error('[Error]', {
+    message: err.message,
+    code: err.code,
+    path: req.path,
+    method: req.method,
+  });
 
+  // Handle specific database errors
   if (err.code === '23505') { // Unique violation
     return res.status(409).json({ error: 'Resource already exists' });
   }
@@ -1809,7 +1831,17 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: 'Missing required field' });
   }
 
-  res.status(500).json({ error: 'Internal server error' });
+  // Production: Never expose stack traces or internal details
+  if (process.env.NODE_ENV === 'production') {
+    res.status(500).json({ error: 'Internal server error' });
+  } else {
+    // Development: Include error details for debugging
+    res.status(500).json({
+      error: 'Internal server error',
+      message: err.message,
+      stack: err.stack
+    });
+  }
 });
 
 // Serve static files in production (must be after API routes)

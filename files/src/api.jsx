@@ -8,7 +8,7 @@ const _API = (() => {
   const host = window.location.hostname;
   const p = window.location.port;
   // Local Vite dev → talk to API directly; preview/prod → same-origin (Vite proxy or reverse proxy)
-  if ((host === "localhost" || host === "127.0.0.1") && p === "5173") {
+  if ((host === "localhost" || host === "127.0.0.1") && (p === "5173" || p === "5174" || p === "5175")) {
     return "http://localhost:3001";
   }
   return ""; // same-origin - use Vite proxy in preview mode
@@ -306,6 +306,7 @@ async function fbUpdateUser(uid, updates) {
     onboardBonusAwarded:"onboard_bonus_awarded", vultureClaimed:"vulture_claimed",
     lastSeenDate:"last_seen_date", graceUsedThisMonth:"grace_used_this_month",
     graceLastMonth:"grace_last_month",
+    roomId:"room_id",
   };
   for (const [k, v] of Object.entries(updates)) {
     const m = mapped[k];
@@ -328,7 +329,10 @@ async function fbUpdateUser(uid, updates) {
       }
     }
     let persisted = false;
-    try { await _apiPatch("/api/users/me", body); persisted = true; } catch {}
+    let apiResult;
+    try { apiResult = await _apiPatch("/api/users/me", body); persisted = true; } catch {}
+    // Update token if new one is returned
+    if (apiResult?.token) localStorage.setItem("kd_token", apiResult.token);
     try {
       const users = _getUsersStore();
       const u = users[uid] || Object.values(users).find(u => u.username === uid);
@@ -359,117 +363,36 @@ async function fbUpdateUser(uid, updates) {
 
 // ── Rooms ────────────────────────────────────────────────────────────────
 async function fbGetRooms() {
-  try {
-    const res = await _apiGet("/api/rooms");
-    return (res.rooms || []).map(r => ({
-      id: r.id, name: r.name, icon: r.icon || "bolt", goal: r.goal || "",
-      niche: r.niche || "general", ageRange: r.age_range || null,
-      tags: r.tags || [], max: r.max_members || 8,
-      members: r.member_count || 0, elite: !!r.elite,
-      days: r.days || 30, createdAt: r.created_at,
-      membersList: r.membersList || [],
-      creatorUid: r.creator_uid || null,
-    }));
-  } catch {
-    const local = (() => { try { return JSON.parse(localStorage.getItem("kd_rooms") || "{}"); } catch { return {}; } })();
-    return Object.values(local).map(r => ({
-      id: r.id, name: r.name, icon: r.icon || "bolt", goal: r.goal || "",
-      niche: r.niche || "general", ageRange: r.ageRange || null,
-      tags: r.tags || [], max: r.max || 8,
-      members: r.members || 0, elite: !!r.elite,
-      days: r.days || 30, createdAt: r.createdAt,
-      membersList: r.membersList || [],
-      creatorUid: r.creatorUid || null,
-    }));
-  }
+  const res = await _apiGet("/api/rooms");
+  return (res.rooms || []).map(r => ({
+    id: r.id, name: r.name, icon: r.icon || "bolt", goal: r.goal || "",
+    niche: r.niche || "general", ageRange: r.age_range || null,
+    tags: r.tags || [], max: r.max_members || 8,
+    members: r.member_count || 0, elite: !!r.elite,
+    days: r.days || 30, createdAt: r.created_at,
+    membersList: r.membersList || [],
+    creatorUid: r.creator_uid || null,
+  }));
 }
 
 async function fbCreateRoom(data) {
-  try {
-    const res = await _apiPost("/api/rooms", {
-      name: data.name, icon: data.icon, goal: data.goal,
-      niche: data.niche, ageRange: data.ageRange,
-      tags: data.tags, maxMembers: data.max,
-      elite: data.elite, days: data.days,
-    });
-    // Mirror into local store so offline reload still sees it
-    try {
-      const local = JSON.parse(localStorage.getItem("kd_rooms") || "{}");
-      const r = res.room;
-      local[r.id] = {
-        id: r.id, name: r.name, icon: r.icon, goal: r.goal, niche: r.niche || data.niche,
-        ageRange: r.age_range, tags: r.tags || [], max: r.max_members || data.max || 8,
-        members: r.member_count || 1, elite: !!r.elite, days: r.days || 30,
-        createdAt: r.created_at, membersList: r.membersList || [],
-        memberUids: r.memberUids || [], creatorUid: r.creator_uid,
-      };
-      localStorage.setItem("kd_rooms", JSON.stringify(local));
-    } catch {}
-    return res.room;
-  } catch {
-    const uid = localStorage.getItem("kd_current_uid") || null;
-    const users = _getUsersStore();
-    const me = users[uid] || Object.values(users).find(u => u.id === uid || u.username === uid);
-    const id = "room_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-    const init = ((me?.username || "?") + "").slice(0, 2).toUpperCase();
-    const room = {
-      id, name: data.name, icon: data.icon || "bolt", goal: data.goal || "",
-      niche: data.niche || "general", ageRange: data.ageRange || null,
-      tags: data.tags || [], max: data.max || 8, members: 1, elite: !!data.elite,
-      days: data.days || 30, createdAt: new Date().toISOString(),
-      membersList: [init], memberUids: uid ? [uid] : [], creatorUid: uid,
-    };
-    const local = (() => { try { return JSON.parse(localStorage.getItem("kd_rooms") || "{}"); } catch { return {}; } })();
-    local[id] = room;
-    localStorage.setItem("kd_rooms", JSON.stringify(local));
-    if (uid) {
-      const rp = (() => { try { return JSON.parse(localStorage.getItem("kd_roomParticipants") || "{}"); } catch { return {}; } })();
-      const mid = "rm_" + Date.now();
-      rp[mid] = { id: mid, roomId: id, userId: uid, status: "active", joinedAt: new Date().toISOString() };
-      localStorage.setItem("kd_roomParticipants", JSON.stringify(rp));
-    }
-    return {
-      id: room.id, name: room.name, icon: room.icon, goal: room.goal,
-      niche: room.niche, age_range: room.ageRange, tags: room.tags,
-      max_members: room.max, member_count: 1, elite: room.elite, days: room.days,
-      created_at: room.createdAt, creator_uid: room.creatorUid,
-      membersList: room.membersList, memberUids: room.memberUids,
-    };
-  }
+  const res = await _apiPost("/api/rooms", {
+    name: data.name, icon: data.icon, goal: data.goal,
+    niche: data.niche, ageRange: data.ageRange,
+    tags: data.tags, maxMembers: data.max,
+    elite: data.elite, days: data.days,
+  });
+  // Update token if new one is returned
+  if (res.token) localStorage.setItem("kd_token", res.token);
+  // Return the backend response - no localStorage fallback to prevent fake persistence
+  return res.room;
 }
 
 async function fbJoinRoom(uid, roomId, init) {
-  try {
-    await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/join");
-    return { ok: true };
-  } catch (e) {
-    try {
-      const local = JSON.parse(localStorage.getItem("kd_rooms") || "{}");
-      const room = local[roomId];
-      if (!room) return { ok: false, error: e.message || "Room not found" };
-      if ((room.members || 0) >= (room.max || 8)) return { ok: false, error: "Room is full" };
-      const memberUids = Array.isArray(room.memberUids) ? room.memberUids : [];
-      if (uid && !memberUids.includes(uid)) memberUids.push(uid);
-      const membersList = Array.isArray(room.membersList) ? room.membersList : [];
-      if (init && !membersList.includes(init)) membersList.push(init);
-      room.memberUids = memberUids;
-      room.membersList = membersList;
-      room.members = memberUids.length || membersList.length;
-      local[roomId] = room;
-      localStorage.setItem("kd_rooms", JSON.stringify(local));
-      const rp = JSON.parse(localStorage.getItem("kd_roomParticipants") || "{}");
-      // leave other rooms
-      for (const m of Object.values(rp)) {
-        if (m.userId === uid && m.status === "active") m.status = "left";
-      }
-      const mid = "rm_" + Date.now();
-      rp[mid] = { id: mid, roomId, userId: uid, status: "active", joinedAt: new Date().toISOString() };
-      localStorage.setItem("kd_roomParticipants", JSON.stringify(rp));
-      return { ok: true };
-    } catch {
-      return { ok: false, error: e.message || "Failed to join" };
-    }
-  }
+  const res = await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/join", { userId: uid });
+  // Update token if new one is returned
+  if (res.token) localStorage.setItem("kd_token", res.token);
+  return { ok: true };
 }
 
 async function fbGetRoomById(roomId) {
@@ -491,35 +414,13 @@ async function fbGetMyRoom() {
 }
 
 async function fbLeaveRoom(uid, roomId, init) {
-  try {
-    await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/leave");
-    return { ok: true };
-  } catch {
-    try {
-      const local = JSON.parse(localStorage.getItem("kd_rooms") || "{}");
-      const room = local[roomId];
-      if (room) {
-        room.memberUids = (room.memberUids || []).filter(x => x !== uid);
-        room.membersList = (room.membersList || []).filter(x => x !== init);
-        room.members = Math.max(0, (room.memberUids.length || room.membersList.length));
-        local[roomId] = room;
-        localStorage.setItem("kd_rooms", JSON.stringify(local));
-      }
-      const rp = JSON.parse(localStorage.getItem("kd_roomParticipants") || "{}");
-      for (const m of Object.values(rp)) {
-        if (m.userId === uid && m.roomId === roomId && m.status === "active") m.status = "left";
-      }
-      localStorage.setItem("kd_roomParticipants", JSON.stringify(rp));
-      return { ok: true };
-    } catch { return { ok: false, error: "Failed to leave" }; }
-  }
+  await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/leave");
+  return { ok: true };
 }
 
 async function fbKickUser(uid, roomId, targetId, xpPenalty, kickEntry, moderatorId) {
-  try {
-    await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/kick", { targetId, reason: kickEntry?.reason || "" });
-    return { ok: true };
-  } catch { return { ok: false }; }
+  await _apiPost("/api/rooms/" + encodeURIComponent(roomId) + "/kick", { targetId, reason: kickEntry?.reason || "" });
+  return { ok: true };
 }
 
 // ── Waiting Queue ─────────────────────────────────────────────────────────────
@@ -1005,97 +906,28 @@ function _saveCloseFriendRequestsStore(v) {
 }
 
 async function fbGetCloseFriends() {
-  try { const res = await _apiGet("/api/close-friends"); return res.friends || []; }
-  catch {
-    const uid = localStorage.getItem("kd_current_uid");
-    const store = _getCloseFriendsStore();
-    const users = _getUsersStore();
-    return Object.values(store)
-      .filter(f => f.a === uid || f.b === uid)
-      .map(f => {
-        const other = f.a === uid ? f.b : f.a;
-        const u = users[other] || Object.values(users).find(x => x.id === other || x.username === other);
-        return u ? _mapUser(u) : null;
-      })
-      .filter(Boolean);
-  }
+  const res = await _apiGet("/api/close-friends");
+  return res.friends || [];
 }
 
 async function fbGetCloseFriendRequests() {
-  try { const res = await _apiGet("/api/close-friends/requests"); return res; }
-  catch {
-    const uid = localStorage.getItem("kd_current_uid");
-    const all = Object.values(_getCloseFriendRequestsStore());
-    return {
-      sent: all.filter(r => r.from === uid && r.status === "pending"),
-      received: all.filter(r => r.to === uid && r.status === "pending"),
-    };
-  }
+  const res = await _apiGet("/api/close-friends/requests");
+  return res;
 }
 
 async function fbSendCloseFriendRequest(targetId) {
-  try { await _apiPost("/api/close-friends/request", { targetId }); return { ok: true }; }
-  catch (e) {
-    try {
-      const uid = localStorage.getItem("kd_current_uid");
-      const users = _getUsersStore();
-      const target = users[targetId] || Object.values(users).find(u => u.id === targetId || u.username === targetId);
-      if (!target || !uid) return { ok: false, error: e };
-      const id = "cfr_" + Date.now();
-      const store = _getCloseFriendRequestsStore();
-      store[id] = { id, from: uid, to: target.id || target.username, status: "pending", createdAt: new Date().toISOString() };
-      _saveCloseFriendRequestsStore(store);
-      // Notify target via shared notifs store
-      try {
-        const notifs = JSON.parse(localStorage.getItem("kd_notifications") || "{}");
-        const nid = "notif_" + Date.now();
-        notifs[nid] = {
-          id: nid, userId: target.id || target.username, recipientId: target.id || target.username,
-          type: "friend_request", read: false, createdAt: new Date().toISOString(),
-          requestId: id, fromUid: uid,
-        };
-        localStorage.setItem("kd_notifications", JSON.stringify(notifs));
-      } catch {}
-      return { ok: true };
-    } catch { return { ok: false, error: e }; }
-  }
+  await _apiPost("/api/close-friends/request", { targetId });
+  return { ok: true };
 }
 
 async function fbRespondCloseFriendRequest(requestId, accept) {
-  try { await _apiPost("/api/close-friends/respond", { requestId, accept }); return { ok: true }; }
-  catch {
-    try {
-      const uid = localStorage.getItem("kd_current_uid");
-      const store = _getCloseFriendRequestsStore();
-      const r = store[requestId];
-      if (!r || r.to !== uid) return { ok: false };
-      r.status = accept ? "accepted" : "declined";
-      store[requestId] = r;
-      _saveCloseFriendRequestsStore(store);
-      if (accept) {
-        const friends = _getCloseFriendsStore();
-        const fid = "cf_" + Date.now();
-        friends[fid] = { id: fid, a: r.from, b: r.to, createdAt: new Date().toISOString() };
-        _saveCloseFriendsStore(friends);
-      }
-      return { ok: true };
-    } catch { return { ok: false }; }
-  }
+  await _apiPost("/api/close-friends/respond", { requestId, accept });
+  return { ok: true };
 }
 
 async function fbRemoveCloseFriend(friendId) {
-  try { await _apiDel("/api/close-friends/" + encodeURIComponent(friendId)); return { ok: true }; }
-  catch {
-    try {
-      const uid = localStorage.getItem("kd_current_uid");
-      const friends = _getCloseFriendsStore();
-      for (const [id, f] of Object.entries(friends)) {
-        if ((f.a === uid && (f.b === friendId)) || (f.b === uid && (f.a === friendId))) delete friends[id];
-      }
-      _saveCloseFriendsStore(friends);
-      return { ok: true };
-    } catch { return { ok: false }; }
-  }
+  await _apiDel("/api/close-friends/" + encodeURIComponent(friendId));
+  return { ok: true };
 }
 
 // ── Economy / Freeze Tokens ──────────────────────────────────────────

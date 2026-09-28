@@ -2,11 +2,12 @@ import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Suppress SSL warnings for Supabase compatibility
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+// Load environment variables from .env.local
+dotenv.config({ path: path.join(__dirname, '../.env.local') });
 
 // Database connection pool configuration
 // Support both Vercel Supabase variables and custom DB_* variables
@@ -19,11 +20,23 @@ if (!connectionString) {
   throw new Error('Database connection string is required. Set POSTGRES_URL environment variable.');
 }
 
+// Configure SSL for production
+const sslConfig = process.env.NODE_ENV === 'production' 
+  ? { rejectUnauthorized: true } 
+  : false;
+
 const pool = new pg.Pool({
   connectionString,
   max: 20, // Maximum pool size
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
+  ssl: sslConfig,
+});
+
+// Handle pool errors
+pool.on('error', (err) => {
+  console.error('[Database] Unexpected error on idle client', err);
+  process.exit(-1);
 });
 
 // Run migrations on startup
@@ -95,7 +108,7 @@ async function query(text, params) {
   }
 }
 
-// Transaction helper
+// Transaction helper with proper error handling
 async function transaction(callback) {
   const client = await pool.connect();
   try {
@@ -129,10 +142,15 @@ async function healthCheck() {
   }
 }
 
-// Graceful shutdown
+// Graceful shutdown with connection cleanup
 async function shutdown() {
-  await pool.end();
-  console.log('Database pool closed');
+  try {
+    // Clear any pending queries
+    await pool.end();
+    console.log('[Database] Pool closed gracefully');
+  } catch (error) {
+    console.error('[Database] Error during shutdown:', error);
+  }
 }
 
 // Check if database is connected

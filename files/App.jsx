@@ -177,16 +177,11 @@ function generateShareText({ type, streak, displayName, userId, daysSurvived, ro
 
 function getComebackState(userState, joinedRoom) {
   if (!userState.kickedFromRoom) return { eligible: false };
-  
-  // Check if user was the room creator
-  const isCreator = joinedRoom?.creator_uid === userState.userId || joinedRoom?.creatorId === userState.userId;
-  
+
   return {
     eligible: true,
-    xpPenalty: isCreator ? 0 : 20,
-    message: isCreator 
-      ? "You created this room. You can rejoin without penalty."
-      : "You were kicked. Pay 20 XP to rejoin immediately or wait 24h for free.",
+    xpPenalty: 0,
+    message: "You were removed from your room. You can rejoin anytime — no XP fee.",
   };
 }
 
@@ -641,46 +636,6 @@ function isGoalLocked(g){return!!(g?.locked);}
 function onAuthStateChanged(cb){_authListener=cb;setTimeout(()=>cb(_currentUser),0);return()=>{_authListener=null;};}
 // _getUsersStore, _saveUsersStore, fbSignup, fbLogin, fbLogout, fbGetUser,
 // fbUpdateUser, fbGetAllUsers, fbCheckUserId, fbSubscribeUser imported from api.jsx
-// ── Persistent room store helpers ─────────────────────────────────────────────
-function _getRoomsStore(){return lsGet(LS_KEYS.rooms) || {};}
-function _saveRoomsStore(rooms){lsSet(LS_KEYS.rooms,rooms);}
-// fbGetRooms, fbCreateRoom imported from api.jsx
-// ── Multi-user room membership helpers ────────────────────────────────────────
-// memberUids tracks the *real* set of distinct users in a room (by uid), separate
-// from membersList (2-letter display initials, which can collide between users).
-function _getActiveRoomIdForUser(uid){
-  if(!uid)return null;
-  const rp=lsGet("kd_roomParticipants")||{};
-  const active=Object.values(rp).find(r=>r.status==="active"&&r.userId===uid);
-  return active?.roomId||null;
-}
-// ── Anti-raid: repeated join/leave ("room hopping") detection ────────────────
-// Raiders often join a room, post, leave, and rejoin a different room
-// repeatedly to spread spam or evade per-room rate limits. We log every
-// join/leave transition per user and, if a user racks up too many
-// transitions in a short window, place them on a temporary room-join
-// cooldown (separate from — and in addition to — moderator suspensions).
-// LS_JOIN_LOG, LS_JOIN_COOLDOWN, JOIN_FLOOD_COUNT, JOIN_FLOOD_WINDOW,
-// JOIN_COOLDOWN_MS moved to src/constants/safetyConfig.js
-
-function _recordRoomTransition(uid, type /* "join" | "leave" */) {
-  if (!uid) return;
-  try {
-    const all = JSON.parse(localStorage.getItem(LS_JOIN_LOG) || "{}");
-    const now = Date.now();
-    const log = (all[uid] || []).filter(t => now - t.ts < JOIN_FLOOD_WINDOW);
-    log.push({ type, ts: now });
-    all[uid] = log;
-    localStorage.setItem(LS_JOIN_LOG, JSON.stringify(all));
-    if (log.length >= JOIN_FLOOD_COUNT) {
-      const cooldowns = JSON.parse(localStorage.getItem(LS_JOIN_COOLDOWN) || "{}");
-      cooldowns[uid] = { until: now + JOIN_COOLDOWN_MS, reason: "Repeated room joins/leaves detected" };
-      localStorage.setItem(LS_JOIN_COOLDOWN, JSON.stringify(cooldowns));
-      _writeAudit("room_hop_cooldown", "SYSTEM", uid, { transitions: log.length, windowMs: JOIN_FLOOD_WINDOW, cooldownMs: JOIN_COOLDOWN_MS });
-    }
-  } catch {}
-}
-// Returns { onCooldown: bool, remainingMs, reason } — checked before allowing a join.
 // fbGetJoinCooldown, fbJoinRoom, fbLeaveRoom, fbKickUser, fbSubmitProof,
 // fbGetProofs, fbGetLeaderboard imported from api.jsx
 async function fbVoteProof(proofId,voteType,voterUid){
@@ -4604,7 +4559,7 @@ function ModerationModal({ open, onClose, result, imageUrl }) {
 }
 
 // ── EnterWithCodeModal — join a room via invite link/code ─────────────────────
-function EnterWithCodeModal({ open, onClose, onJoin, rooms, me }) {
+function EnterWithCodeModal({ open, onClose, onJoin, rooms = [], me }) {
   const { T } = useTheme();
   const [code, setCode] = useState("");
   const [status, setStatus] = useState(null); // null | "checking" | "found" | "invalid"
@@ -4668,7 +4623,7 @@ function EnterWithCodeModal({ open, onClose, onJoin, rooms, me }) {
             <div>
               <div style={{ fontWeight: 600, fontSize: 14, color: T.text }}>{foundRoom.name}</div>
               <div style={{ fontSize: 12, color: T.textMuted }}>{foundRoom.goal}</div>
-              <div style={{ fontSize: 11, color: T.textFaint, marginTop: 2 }}>Day {getRoomDayNumber(foundRoom)} · {foundRoom.members}/{foundRoom.max} members</div>
+              <div style={{ fontSize: 11, color: T.textFaint, marginTop: 2 }}>Day {getRoomDayNumber(foundRoom)} · {Math.floor(foundRoom.members || 0)}/{foundRoom.max} members</div>
             </div>
           </div>
         </div>
@@ -5060,7 +5015,7 @@ function PersonProfileModal({ person, open, onClose, following, onFollow }) {
   );
 }
 
-function SearchView({ rooms, joinedRoom, onJoin, profile, following, onFollow, setView, me, onInviteToRoom, allUsers = [] }) {
+function SearchView({ rooms = [], joinedRoom, onJoin, profile, following, onFollow, setView, me, onInviteToRoom, allUsers = [] }) {
   // BUG FIX: Build people list from the full allUsers array (all registered users).
   // We also run a live DB query on each search so users registered after page load,
   // or beyond any load cap, are still found correctly.
@@ -5621,7 +5576,7 @@ function BadgesView({ profile, me }) {
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
-function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMemberClick, userState, onAutoMatch, proofHistory, alreadySubmittedToday, me, onShareStreak, onBattle, onChallenge, onVultureClaim, onRejoin, allUsers = [], onQuestXP }) {
+function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMemberClick, userState, onAutoMatch, proofHistory, alreadySubmittedToday, me, onShareStreak, onBattle, onChallenge, onVultureClaim, onRejoin, allUsers = [], onQuestXP, rooms = [] }) {
   const { T } = useTheme();
   const card = { background: T.surface, borderRadius: 12, border: `1px solid ${T.border}`, padding: "20px 24px" };
   const [dashTab, setDashTab] = useState("main"); // "main" | "struggle"
@@ -5807,7 +5762,7 @@ function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMem
                 <div style={{ width: `${Math.min(100, Math.round(getRoomDayNumber(joinedRoom)/Math.max(1,joinedRoom.days)*100))}%`, height: "100%", background: SHARED.yellow, borderRadius: 4 }} />
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.textFaint, marginBottom: 12 }}>
-                <span style={{ fontWeight: 700, color: SHARED.yellow }}>Day {getRoomDayNumber(joinedRoom)}</span><span>{joinedRoom.members}/{joinedRoom.max} members</span>
+                <span style={{ fontWeight: 700, color: SHARED.yellow }}>Day {getRoomDayNumber(joinedRoom)}</span><span>{Math.floor(joinedRoom.members || 0)}/{joinedRoom.max} members</span>
               </div>
 
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
@@ -5837,7 +5792,7 @@ function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMem
         {(allUsers.length === 0 && liveBoard.length === 0)
           ? <div style={{ fontSize: 13, color: T.textMuted, padding: "12px 0" }}>No active rooms yet. <button onClick={() => setView("rooms")} style={{ background:"none", border:"none", color: SHARED.yellow, fontWeight:600, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Create one →</button></div>
           : (() => {
-              const roomsStore = Object.values(_getRoomsStore?.() || {}).filter(r => (r.members||0) > 0).sort((a,b) => (b.members||0) - (a.members||0)).slice(0,4);
+              const roomsStore = (rooms || []).filter(r => (r.members||0) > 0).sort((a,b) => (b.members||0) - (a.members||0)).slice(0,4);
               if (roomsStore.length === 0) return <div style={{ fontSize:13, color:T.textMuted, padding:"12px 0" }}>No active rooms. <button onClick={() => setView("rooms")} style={{ background:"none", border:"none", color:SHARED.yellow, fontWeight:600, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Create one →</button></div>;
               return roomsStore.map((r, i) => (
                 <div key={r.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 0", borderBottom: i < roomsStore.length-1 ? `1px solid ${T.border}` : "none", cursor:"pointer" }}
@@ -5850,7 +5805,7 @@ function Dashboard({ joinedRoom, onSubmitProof, onGrace, setView, profile, onMem
                     <div style={{ fontSize:11, color:T.textMuted, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.goal}</div>
                   </div>
                   <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", flexShrink:0 }}>
-                    <span style={{ fontSize:11, fontWeight:700, color:"#22c55e" }}>{r.members}/{r.max || 8} active</span>
+                    <span style={{ fontSize:11, fontWeight:700, color:"#22c55e" }}>{Math.floor(r.members || 0)}/{r.max || 8} active</span>
                     <span style={{ fontSize:10, color:T.textFaint }}>Day {getRoomDayNumber(r)}</span>
                   </div>
                 </div>
@@ -6151,7 +6106,7 @@ function RoomCard({ room, isJoined, hasAnyRoom, onJoin }) {
   const roomIcon    = room.goalKey || room.icon || "workout";
   const roomGoal    = room.goal    || "Daily accountability";
   const roomMax     = room.max     ?? 8;
-  const roomMembers = room.members ?? (room.membersList?.length ?? 0);
+  const roomMembers = Math.floor(room.members ?? (room.membersList?.length ?? 0));
   const roomDays    = room.days    ?? 30;
   const roomStartDay= room.startDay?? 0;
 
@@ -9634,7 +9589,7 @@ function AuthSplitLayout({ children, step = 0, totalSteps = 0, onBack }) {
 // src/constants/roomOptions.js
 // ─────────────────────────────────────────────────────────────────────────────
 
-function OnboardingFlow({ userData, rooms, onComplete }) {
+function OnboardingFlow({ userData, rooms: roomsProp = [], onComplete }) {
   const [phase,    setPhase]    = useState("niche");
   const [selNiche, setSelNiche] = useState("");
   const [selAge,   setSelAge]   = useState("");
@@ -9660,7 +9615,7 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
       await new Promise(r => setTimeout(r, 340 + Math.random()*220));
       setProgress(s.pct); setMatchTxt(s.txt);
     }
-    const allRooms = Object.values(_getRoomsStore()).map(r=>({...r}));
+    const allRooms = (roomsProp || []).map(r=>({...r}));
     const available = allRooms.filter(r=>(r.members??0)<(r.max??8));
     const exact = available.filter(r=>r.niche===niche&&r.ageRange===age).sort((a,b)=>(b.members||0)-(a.members||0));
     const isNew = exact.length===0;
@@ -9674,18 +9629,14 @@ function OnboardingFlow({ userData, rooms, onComplete }) {
       niche, ageRange:age, tags:[niche], membersList:[],
       createdAt:new Date().toISOString(), creatorUid:userData?.uid||null,
     } : exact[0];
-    if (isNew) { let createdId = best.id; try { const created = await fbCreateRoom({...best}); if (created?.id) createdId = created.id; } catch {} best={...best,id:createdId}; const _rr=_getRoomsStore();_rr[best.id]={...best};_saveRoomsStore(_rr); }
+    if (isNew) { let createdId = best.id; try { const created = await fbCreateRoom({...best}); if (created?.id) createdId = created.id; } catch {} best={...best,id:createdId}; }
     if (userData?.uid) {
       const joinResult = await fbJoinRoom(userData.uid, best.id, (userData.userId||"?").slice(0,2).toUpperCase());
       if (!joinResult.ok && (joinResult.error === "Room not found" || joinResult.error?.includes("fetch") || joinResult.error?.includes("network"))) {
-        let createdId = best.id; try { const created = await fbCreateRoom({...best}); if (created?.id) createdId = created.id; } catch {} const staleId = best.id; best = { ...best, id: createdId }; const _rr = _getRoomsStore(); delete _rr[staleId]; _rr[best.id] = { ...best }; _saveRoomsStore(_rr); await fbJoinRoom(userData.uid, best.id, (userData.userId||"?").slice(0,2).toUpperCase()).catch(()=>{});
+        let createdId = best.id; try { const created = await fbCreateRoom({...best}); if (created?.id) createdId = created.id; } catch {} best = { ...best, id: createdId }; await fbJoinRoom(userData.uid, best.id, (userData.userId||"?").slice(0,2).toUpperCase()).catch(()=>{});
       }
-      _putDoc("roomParticipants", userData.uid+"_"+best.id, {userId:userData.uid,roomId:best.id,status:"active",joinedAt:new Date().toISOString()});
-      // Set joinedRoomId in localStorage so dashboard recognizes the room
-      try { localStorage.setItem(_nsKey("kd_joinedRoomId"), String(best.id)); } catch {}
       const roomJoinedAt = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
-      await fbUpdateUser(userData.uid, { niche, ageRange:age, onboardingComplete:true, onboardingQuestionsComplete:true, joinTimestamp:new Date().toISOString(), roomJoinedAt }).catch(()=>{});
-      if (userData.uid){const users=_getUsersStore();if(users[userData.uid]){Object.assign(users[userData.uid],{niche,ageRange:age,onboardingComplete:true,roomJoinedAt});_saveUsersStore(users);}}
+      await fbUpdateUser(userData.uid, { niche, ageRange:age, onboardingComplete:true, onboardingQuestionsComplete:true, joinTimestamp:new Date().toISOString(), roomJoinedAt, roomId: best.id }).catch(()=>{});
     }
     setMatchedRoom(best); setPhase("done");
     setTimeout(()=>onComplete({room:best,isNew,niche,ageRange:age}),1200);
@@ -10015,12 +9966,13 @@ function LandingPage({ onEnter }) {
     // create a second room record (or overwrite the freshly-joined room's
     // membersList/memberUids back to empty), which caused the "wrong room" /
     // mismatched room name bug after onboarding. Just transition into the app.
-    onEnter("signup", { isNewUser: true, user: pendingUser, joinedRoomId: matchResult?.room?.id || null, invitedBy: pendingUser?.invitedBy || null });
+    // The user's room will be fetched from the backend via fbGetMyRoom() on app load.
+    onEnter("signup", { isNewUser: true, user: pendingUser, invitedBy: pendingUser?.invitedBy || null });
   }
 
   // ── ONBOARDING SCREEN ──────────────────────────────────────────────────────
   if (screen === "onboarding" && pendingUser) {
-    return <OnboardingFlow userData={pendingUser} rooms={rooms} onComplete={handleOnboardingComplete} />;
+    return <OnboardingFlow userData={pendingUser} rooms={rooms || []} onComplete={handleOnboardingComplete} />;
   }
 
   // ── AUTH SCREENS ───────────────────────────────────────────────────────────
@@ -10949,11 +10901,7 @@ function ComebackBanner({ userState, onRejoin, onFindRoom, joinedRoom }) {
       <div style={{ fontWeight: 700, fontSize: 14, color: "#ef4444", marginBottom: 6, display:"flex", alignItems:"center", gap:5 }}><KDSkull size={18}/>You were kicked</div>
       <div style={{ fontSize: 13, color: T.errorText, marginBottom: 12 }}>{message}</div>
       <div style={{ display: "flex", gap: 8 }}>
-        {cb.xpPenalty > 0 ? (
-          <Btn size="sm" variant="danger" onClick={onRejoin}>Pay {cb.xpPenalty} XP · Rejoin now</Btn>
-        ) : (
-          <Btn size="sm" variant="primary" onClick={onRejoin}>Rejoin now</Btn>
-        )}
+        <Btn size="sm" variant="primary" onClick={onRejoin}>Rejoin now</Btn>
         <Btn size="sm" variant="ghost" onClick={onFindRoom}>Find new room</Btn>
       </div>
     </div>
@@ -13811,17 +13759,7 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   const [view,         setView]         = useState("dashboard");
   const [adminOpen,    setAdminOpen]    = useState(false);
   const [rooms,        setRooms]        = useState([]);
-  const [joinedRoomId, setJoinedRoomId] = useState(() => {
-    // Eagerly read persisted joinedRoomId so joinedRoom resolves on first render,
-    // before fbGetRooms() promise resolves — eliminates "room only shows after refresh".
-    try {
-      const saved = localStorage.getItem(_nsKey("kd_joinedRoomId"));
-      if (saved) return saved;
-      const rp = lsGet("kd_roomParticipants") || {};
-      const active = Object.values(rp).find(r => r.status === "active" && r.userId === firebaseUid);
-      return active?.roomId || null;
-    } catch { return null; }
-  });
+  const [joinedRoomId, setJoinedRoomId] = useState(null);
   const [feed,         setFeed]         = useState([]);
   const [proofHistory, setProofHistory] = useState([]);
   const [profile,      setProfile]      = useState({
@@ -13896,19 +13834,9 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   }, [fbData]);
 
   // ── Load rooms ───────────────────────────────────────────────────────────
-  // joinedRoomId is now initialised eagerly from localStorage (see useState above).
-  // This effect only needs to populate the rooms list; joinedRoom derivation is
-  // a pure rooms.find() so it resolves correctly as soon as rooms loads.
   useEffect(() => {
     fbGetRooms().then(r => {
       setRooms(Array.isArray(r) ? r : []);
-      // After rooms load, validate that our persisted joinedRoomId still exists.
-      // If the room was deleted/expired, clear the stale id.
-      setJoinedRoomId(prev => {
-        if (!prev) return prev;
-        const still = (r || []).find(rm => String(rm.id) === String(prev));
-        return still ? prev : null;
-      });
     }).catch(() => {});
   }, [uid]);
 
@@ -13921,9 +13849,13 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
       if (result?.room?.id) {
         console.log('[App] Found active room from backend', { roomId: result.room.id });
         setJoinedRoomId(String(result.room.id));
+      } else {
+        // No active room in database, clear frontend state
+        setJoinedRoomId(null);
       }
     }).catch(() => {
       console.log('[App] No active room found from backend');
+      setJoinedRoomId(null);
     });
   }, [uid]);
 
@@ -14098,13 +14030,6 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   // ── Backend / socket status ───────────────────────────────────────────────
   const backendStatus = "live";
   // Socket not needed in preview — status is always "live"
-  // FIX 2: Coerce both sides to string so number/string room ID mismatch never causes joinedRoom to be null
-  // Persist joinedRoomId whenever it changes so lazy useState init reads it on next mount
-  useEffect(() => {
-    if (joinedRoomId) localStorage.setItem(_nsKey("kd_joinedRoomId"), String(joinedRoomId));
-    else localStorage.removeItem(_nsKey("kd_joinedRoomId"));
-  }, [joinedRoomId]);
-
   const joinedRoom = (rooms || []).find(r => String(r.id) === String(joinedRoomId)) || null;
 
   // ── Midnight rollover: force a re-render at exactly 00:00 local time ─────────
@@ -14312,26 +14237,11 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
 
   // ── Daily reminder + near-miss wired below after alreadySubmittedToday ────────
 
-  // ── Instant comeback rejoin ───────────────────────────────────────────────────
+  // ── Instant comeback rejoin (no XP fee) ───────────────────────────────────────
   async function handleComebackRejoin() {
-    const cb = getComebackState(userState, joinedRoom);
-    const penalty = cb.xpPenalty;
-    const currentXP = userState.xp ?? 0;
-    
-    if (penalty > 0 && currentXP < penalty) { 
-      showToast("Not enough XP for instant rejoin", "error"); 
-      return; 
-    }
-    
-    const newXP = currentXP - penalty;
-    manualSet(prev => ({ ...prev, xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }));
-    if (uid) await fbUpdateUser(uid, { xp: newXP, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }).catch(() => {});
-    
-    if (penalty > 0) {
-      showToast(`-${penalty} XP paid. You can rejoin a room now.`, "success");
-    } else {
-      showToast("You can rejoin a room now.", "success");
-    }
+    manualSet(prev => ({ ...prev, kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }));
+    if (uid) await fbUpdateUser(uid, { kickedFromRoom: false, kickStatus: "ok", missedDays: 0 }).catch(() => {});
+    showToast("You can rejoin a room now.", "success");
   }
 
   // ── Premium toggle → Firestore ────────────────────────────────────────────────
@@ -14600,10 +14510,12 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
     if (!joinedRoom) { showToast("Join a room first to invite others", "error"); return; }
     if (!person?.userId && !person?.init) { showToast("Invalid user", "error"); return; }
     
-    // Check if person is a friend
-    const friends = loadFriends();
+    // Check if person is a friend using the actual backend close friends list
+    const friends = await fbGetCloseFriends();
     const recipientId = person.uid || person.userId;
-    if (!friends.includes(recipientId)) {
+    const isFriend = friends.some(f => f.userId === recipientId || f.uid === recipientId);
+    
+    if (!isFriend) {
       showToast("You can only invite friends to your room", "error");
       return;
     }
@@ -14928,7 +14840,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
           showToast(joinResult.error === "Room is full" ? "Room just filled — finding another match…" : (joinResult.error || "Could not join room. Try again."), "error");
           return;
         }
-        await fbUpdateUser(uid, { roomJoinedAt: joinDate }).catch(() => {});
+        await fbUpdateUser(uid, { roomJoinedAt: joinDate, roomId: room.id }).catch(() => {});
       }
       setJoinedRoomId(room.id);
       setProfile(prev => ({ ...prev, roomJoinedAt: joinDate }));
@@ -15171,7 +15083,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
     return (
       <OnboardingFlow
         userData={fbData}
-        rooms={Object.values(_getRoomsStore()).map(r => ({...r}))}
+        rooms={rooms || []}
         onComplete={async (matchResult) => {
           // OnboardingFlow.startMatching has already created/joined the room and
           // updated the user's onboardingComplete flag in the backend. Refresh
@@ -15181,12 +15093,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
           if (fresh) setFbData({ ...fresh });
           const freshRooms = await fbGetRooms().catch(() => null);
           if (freshRooms) setRooms(freshRooms);
-          // Use the room from matchResult first, then fallback to localStorage, then database
-          const matchedRoomId = matchResult?.room?.id
-            || localStorage.getItem(_nsKey("kd_joinedRoomId"))
-            || _getActiveRoomIdForUser(fbData.uid)
-            || null;
-          if (matchedRoomId) setJoinedRoomId(String(matchedRoomId));
+          // The user's room will be fetched from the backend via fbGetMyRoom() on app load
         }}
       />
     );
@@ -15358,7 +15265,7 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
             <OnboardingProofTimer onboardingComplete={me.onboardingComplete} submittedToday={alreadySubmittedToday} onExpire={() => showToast("Onboarding window expired. Submit proof anytime!", "default")} />
           </div>
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-            {view === "dashboard" && <Dashboard joinedRoom={joinedRoom} onSubmitProof={data => handleSubmitProof(data)} onGrace={() => setGraceOpen(true)} setView={setView} profile={profile} onMemberClick={m => setViewedMember(m)} userState={userState} onAutoMatch={() => setAutoMatchOpen(true)} proofHistory={proofHistory} alreadySubmittedToday={alreadySubmittedToday} me={me} onVultureClaim={handleVultureClaim} onShareStreak={() => { setShareCardType(me?.streak>=21?'streak_21':me?.streak>=10?'streak_10':me?.streak>=8?'streak_8':me?.streak>=5?'streak_5':'streak_3'); setShareStreakOpen(true); }} onBattle={() => setBattleOpen(true)} onChallenge={() => setChallengeOpen(true)} allUsers={allUsers} onQuestXP={async (xpAmount) => applyXPDelta(xpAmount, { reason: "quest_dashboard" })} />}
+            {view === "dashboard" && <Dashboard joinedRoom={joinedRoom} onSubmitProof={data => handleSubmitProof(data)} onGrace={() => setGraceOpen(true)} setView={setView} profile={profile} onMemberClick={m => setViewedMember(m)} userState={userState} onAutoMatch={() => setAutoMatchOpen(true)} proofHistory={proofHistory} alreadySubmittedToday={alreadySubmittedToday} me={me} onVultureClaim={handleVultureClaim} onShareStreak={() => { setShareCardType(me?.streak>=21?'streak_21':me?.streak>=10?'streak_10':me?.streak>=8?'streak_8':me?.streak>=5?'streak_5':'streak_3'); setShareStreakOpen(true); }} onBattle={() => setBattleOpen(true)} onChallenge={() => setChallengeOpen(true)} allUsers={allUsers} onQuestXP={async (xpAmount) => applyXPDelta(xpAmount, { reason: "quest_dashboard" })} rooms={rooms} />}
             {view === "rooms" && <RoomsView rooms={rooms} joinedRoom={joinedRoom} onJoin={handleJoin} onLeave={() => setLeaveOpen(true)} onCreate={() => setCreateOpen(true)} me={me} allUsers={allUsers} onMemberClick={m => setViewedMember(m)} />}
             {view === "activity" && <ActivityView joinedRoom={joinedRoom} feed={feed} setFeed={setFeed} onProofImagePost={() => {}} following={following} onFollow={handleFollow} setView={setView} userState={userState} submittedToday={alreadySubmittedToday} roomMedia={joinedRoom?.media || []} registerTabSwitcher={fn => { switchToMediaTabRef.current = fn; }} me={me} backendStatus={backendStatus} onChatMsg={xp => awardActivityXP(xp, "chat_msg")} allUsers={allUsers} onMemberClick={m => setViewedMember(m)} />}
             {view === "leaderboard" && <LeaderboardView onMemberClick={m => setViewedMember(m)} me={me} allUsers={allUsers} />}

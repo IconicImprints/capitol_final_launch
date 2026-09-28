@@ -2,13 +2,21 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { validateSession } from './auth.js';
 
-// Security headers
+// Security headers - production configuration
 export const securityHeaders = helmet({
   contentSecurityPolicy: false, // Disabled for frontend compatibility
   crossOriginEmbedderPolicy: false,
+  // Additional security headers
+  hsts: process.env.NODE_ENV === 'production' ? {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  } : false,
 });
 
 // Rate limiting
+// NOTE: Memory store doesn't work across multiple server instances
+// For production with multiple instances, use Redis store: https://github.com/express-rate-limit/redis-store
 export const rateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per windowMs
@@ -120,10 +128,18 @@ export const requireAdmin = (req, res, next) => {
   next();
 };
 
-// Error handling middleware
+// Error handling middleware - production-safe
 export const errorHandler = (err, req, res, next) => {
-  console.error('Error:', err);
+  // Log error without exposing sensitive data
+  console.error('[Error]', {
+    message: err.message,
+    code: err.code,
+    path: req.path,
+    method: req.method,
+    // Never log passwords, tokens, or sensitive data
+  });
   
+  // Handle specific database errors
   if (err.code === '23505') { // Unique violation
     return res.status(409).json({ error: 'Resource already exists' });
   }
@@ -136,15 +152,26 @@ export const errorHandler = (err, req, res, next) => {
     return res.status(400).json({ error: 'Missing required field' });
   }
 
-  res.status(500).json({ error: 'Internal server error' });
+  // Production: Never expose stack traces or internal details
+  if (process.env.NODE_ENV === 'production') {
+    res.status(500).json({ error: 'Internal server error' });
+  } else {
+    // Development: Include error details for debugging
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: err.message,
+      stack: err.stack 
+    });
+  }
 };
 
-// Request logging middleware
+// Request logging middleware - never logs sensitive data
 export const requestLogger = (req, res, next) => {
   const start = Date.now();
   
   res.on('finish', () => {
     const duration = Date.now() - start;
+    // Never log request bodies or headers that might contain sensitive data
     console.log(`${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
   });
   

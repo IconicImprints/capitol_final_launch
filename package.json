@@ -2,6 +2,7 @@
   "name": "capitol-root",
   "private": true,
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "dev": "cd files && npm run dev",
     "build": "cd files && npm run build",
