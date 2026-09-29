@@ -1,9 +1,9 @@
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { query } from './database.js';
+import { supabase } from './database.js';
 
-// JWT Secret Configuration
+// JWT Secret Configuration (for compatibility with existing frontend)
 const JWT_SECRET = process.env.JWT_SECRET || process.env.SUPABASE_JWT_SECRET;
 const JWT_EXPIRES_IN = '7d';
 
@@ -49,65 +49,92 @@ export function verifyToken(token) {
   }
 }
 
-// Create session
+// Create session (compatibility layer - will be phased out for Supabase Auth)
 export async function createSession(userId, ipAddress, userAgent) {
   const token = generateToken(userId);
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-  await query(
-    `INSERT INTO sessions (token, user_id, created_at, expires_at, ip_address, user_agent)
-     VALUES ($1, $2, NOW(), $3, $4, $5)`,
-    [token, userId, expiresAt, ipAddress, userAgent]
-  );
+  // Store session in Supabase for compatibility
+  try {
+    await supabase.from('sessions').insert([{
+      token,
+      user_id: userId,
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt.toISOString(),
+      ip_address: ipAddress,
+      user_agent: userAgent
+    }]);
+  } catch (error) {
+    console.error('[Auth] Failed to create session in Supabase:', error);
+  }
 
   return token;
 }
 
-// Validate session
+// Validate session (compatibility layer)
 export async function validateSession(token) {
   const payload = verifyToken(token);
   if (!payload) return null;
 
-  const result = await query(
-    `SELECT s.*, u.id, u.username, u.email, u.is_banned, u.is_suspended, u.suspension_end
-     FROM sessions s
-     JOIN users u ON s.user_id = u.id
-     WHERE s.token = $1 AND s.expires_at > NOW()`,
-    [token]
-  );
+  try {
+    const { data, error } = await supabase
+      .from('sessions')
+      .select('*, users(*)')
+      .eq('token', token)
+      .gt('expires_at', new Date().toISOString())
+      .single();
 
-  if (result.rows.length === 0) return null;
+    if (error || !data) return null;
 
-  const session = result.rows[0];
+    const session = data;
 
-  // Check if user is banned
-  if (session.is_banned) {
-    return null;
-  }
-
-  // Check if user is suspended
-  if (session.is_suspended) {
-    if (session.suspension_end && new Date(session.suspension_end) > new Date()) {
+    // Check if user is banned
+    if (session.users?.is_banned) {
       return null;
     }
-  }
 
-  return session;
+    // Check if user is suspended
+    if (session.users?.is_suspended) {
+      if (session.users.suspension_end && new Date(session.users.suspension_end) > new Date()) {
+        return null;
+      }
+    }
+
+    return session;
+  } catch (error) {
+    console.error('[Auth] Session validation error:', error);
+    return null;
+  }
 }
 
 // Destroy session
 export async function destroySession(token) {
-  await query('DELETE FROM sessions WHERE token = $1', [token]);
+  try {
+    await supabase.from('sessions').delete().eq('token', token);
+  } catch (error) {
+    console.error('[Auth] Failed to destroy session:', error);
+  }
 }
 
 // Destroy all user sessions
 export async function destroyAllUserSessions(userId) {
-  await query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+  try {
+    await supabase.from('sessions').delete().eq('user_id', userId);
+  } catch (error) {
+    console.error('[Auth] Failed to destroy user sessions:', error);
+  }
 }
 
 // Clean expired sessions
 export async function cleanExpiredSessions() {
-  await query('DELETE FROM sessions WHERE expires_at < NOW()');
+  try {
+    await supabase
+      .from('sessions')
+      .delete()
+      .lt('expires_at', new Date().toISOString());
+  } catch (error) {
+    console.error('[Auth] Failed to clean expired sessions:', error);
+  }
 }
 
 // Start cleanup interval
@@ -115,5 +142,82 @@ export function startCleanupInterval() {
   if (!process.env.VERCEL) {
     // Clean expired sessions every hour
     setInterval(cleanExpiredSessions, 60 * 60 * 1000);
+  }
+}
+
+// ============================================================================
+// SUPABASE AUTH INTEGRATION
+// These functions will eventually replace the custom JWT system
+// ============================================================================
+
+// Sign up user with Supabase Auth
+export async function supabaseSignUp(email, password, userData) {
+  try {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: userData
+      }
+    });
+
+    if (error) throw error;
+
+    // Create user record in our users table
+    if (data.user) {
+      await supabase.from('users').insert([{
+        id: data.user.id,
+        email: email.toLowerCase(),
+        username: userData.username,
+        display_name: userData.display_name,
+        password_hash: await hashPassword(password), // Keep for compatibility
+        ...userData
+      }]);
+    }
+
+    return data;
+  } catch (error) {
+    console.error('[Auth] Supabase signup error:', error);
+    throw error;
+  }
+}
+
+// Sign in user with Supabase Auth
+export async function supabaseSignIn(email, password) {
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (error) throw error;
+
+    return data;
+  } catch (error) {
+    console.error('[Auth] Supabase signin error:', error);
+    throw error;
+  }
+}
+
+// Sign out user from Supabase Auth
+export async function supabaseSignOut() {
+  try {
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
+  } catch (error) {
+    console.error('[Auth] Supabase signout error:', error);
+    throw error;
+  }
+}
+
+// Get current Supabase user
+export async function supabaseGetUser() {
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error) throw error;
+    return user;
+  } catch (error) {
+    console.error('[Auth] Supabase get user error:', error);
+    return null;
   }
 }
