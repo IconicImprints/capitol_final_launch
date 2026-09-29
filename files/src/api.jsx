@@ -153,53 +153,12 @@ async function fbSignup({ displayName, userId, email, password, joinedDate }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || userId);
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(res.user);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("signup_success");
     return { ok: true, user: mapped };
   } catch (e) {
-    const users = _getUsersStore();
-    if (Object.values(users).some(u => (u.username || "").toLowerCase() === String(userId).toLowerCase())) {
-      return { ok: false, error: "Username already taken" };
-    }
-    if (Object.values(users).some(u => (u.email || "").toLowerCase() === String(email).toLowerCase())) {
-      return { ok: false, error: "Email already registered" };
-    }
-    const id = _newUid();
-    const invite = String(userId).toUpperCase().slice(0, 4) + Math.random().toString(36).slice(2, 6).toUpperCase();
-    const palette = ["#F5C800", "#A7D8DE", "#C4B5FD", "#F9A8D4", "#86EFAC", "#FDBA74"];
-    let avatarHash = 0;
-    for (const char of String(userId).toLowerCase()) avatarHash = (avatarHash * 31 + char.charCodeAt(0)) >>> 0;
-    const newUser = {
-      id, username: userId, email,
-      display_name: displayName, photo_url: null,
-      avatar_config: { background: palette[avatarHash % palette.length], letter: String(userId)[0].toUpperCase() },
-      xp: 0, level: 1, streak: 0, best_streak: 0, missed_days: 0,
-      warned: false, kick_status: "ok", kicked_from_room: false,
-      proofs_count: 0, completed_rooms: 0, joined_rooms: 0,
-      join_timestamp: joinedDate || new Date().toISOString(),
-      consistency_score: 0, near_miss_count: 0,
-      league: "bronze", grace_active: false, grace_start_date: null, grace_days_total: 0, total_grace_used: 0,
-      last_submit_date: null, vulture_claimed: null,
-      onboarding_complete: false, onboarding_questions_complete: false,
-      niche: '', age_range: '', room_joined_at: null, onboard_bonus_awarded: false,
-      safety_accepted: false, invite_code: invite, invites_count: 0, burned_at: null,
-      following: [], premium: false, is_admin: false, is_banned: false, is_suspended: false,
-      suspension_end: null, suspend_reason: null, created_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
-      password,
-    };
-    users[id] = newUser;
-    _saveUsersStore(users);
-    const token = "local_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-    localStorage.setItem("kd_token", token);
-    localStorage.setItem("kd_current_uid", id);
-    localStorage.setItem("kd_session", JSON.stringify(_mapUser(newUser)));
-    // Supabase integration removed - using PostgreSQL backend
-    const mapped = _mapUser(newUser);
-    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
-    trackEvent("signup_success");
-    return { ok: true, user: mapped };
+    return { ok: false, error: e.message || "Signup failed" };
   }
 }
 
@@ -209,62 +168,46 @@ async function fbLogin({ email, password }) {
     if (res.token) localStorage.setItem("kd_token", res.token);
     localStorage.setItem("kd_current_uid", res.user?.id || res.user?.username || "");
     localStorage.setItem("kd_session", JSON.stringify(_mapUser(res.user)));
-    // Supabase integration removed - using PostgreSQL backend
     const mapped = _mapUser(res.user);
     identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
     trackEvent("login_success");
     return { ok: true, user: mapped };
   } catch (e) {
-    const users = _getUsersStore();
-    const user = Object.values(users).find(u => (u.email || "").toLowerCase() === String(email).toLowerCase() && u.password === password);
-    if (!user) return { ok: false, error: "Invalid email or password" };
-    const token = "local_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-    localStorage.setItem("kd_token", token);
-    localStorage.setItem("kd_current_uid", user.id || user.username);
-    localStorage.setItem("kd_session", JSON.stringify(_mapUser(user)));
-    // Supabase integration removed - using PostgreSQL backend
-    const mapped = _mapUser(user);
-    identifyUser(mapped.uid || mapped.userId, { username: mapped.userId, email: mapped.email });
-    trackEvent("login_success");
-    return { ok: true, user: mapped };
+    return { ok: false, error: e.message || "Login failed" };
   }
 }
 
 async function fbLogout() {
   try {
+    await _apiPost("/api/auth/logout");
     localStorage.removeItem("kd_token");
     localStorage.removeItem("kd_current_uid");
     localStorage.removeItem("kd_session");
-    await _supabaseSignOut();
     resetAnalytics();
     trackEvent("logout");
-  } catch {}
+  } catch (e) {
+    console.error("Logout error:", e);
+  }
 }
 
 async function fbDeleteAccount() {
   try {
-    const uid = localStorage.getItem("kd_current_uid") || "";
-    const users = _getUsersStore();
-    const target = users[uid] || Object.values(users).find(u => u.username === uid);
-    if (target) {
-      const id = target.id || target.username;
-      delete users[id];
-      _saveUsersStore(users);
-    }
+    await _apiDel("/api/users/me");
     localStorage.removeItem("kd_token");
     localStorage.removeItem("kd_current_uid");
+    localStorage.removeItem("kd_session");
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (e) {
+    return { ok: false, error: e.message || "Account deletion failed" };
+  }
 }
 
 async function fbCheckUserId(username) {
   try {
     const res = await _apiGet("/api/users/check/" + encodeURIComponent(username));
     return { taken: res.taken };
-  } catch {
-    const users = _getUsersStore();
-    const taken = Object.values(users).some(u => (u.username || "").toLowerCase() === String(username).toLowerCase());
-    return { taken };
+  } catch (e) {
+    return { taken: false, error: e.message };
   }
 }
 
@@ -272,10 +215,8 @@ async function fbGetUser(uid) {
   try {
     const res = await _apiGet("/api/users/" + encodeURIComponent(uid));
     return _mapUser(res.user);
-  } catch {
-    const users = _getUsersStore();
-    const user = users[uid] || Object.values(users).find(u => u.username === uid);
-    return user ? _mapUser(user) : null;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -283,9 +224,8 @@ async function fbGetAllUsers() {
   try {
     const res = await _apiGet("/api/users");
     return (res.users || []).map(_mapUser);
-  } catch {
-    const users = _getUsersStore();
-    return Object.values(users).map(_mapUser);
+  } catch (e) {
+    return [];
   }
 }
 
@@ -313,50 +253,14 @@ async function fbUpdateUser(uid, updates) {
     if (m) body[m] = v;
   }
   if (Object.keys(body).length) {
-    const hasImageUpdate = Object.prototype.hasOwnProperty.call(body, "photo_url")
-      || Object.prototype.hasOwnProperty.call(body, "banner_url");
-    if (hasImageUpdate) {
-      // Image references must be confirmed by the authenticated backend.
-      // Falling back to localStorage here creates a false success and loses the
-      // image on refresh or login from another device.
-      try {
-        const result = await _apiPatch("/api/users/me", body);
-        console.info("[Capitol upload] database update result", { body, result });
-        return true;
-      } catch {
-        console.error("[Capitol upload] database update failed", body);
-        return false;
-      }
-    }
-    let persisted = false;
-    let apiResult;
-    try { apiResult = await _apiPatch("/api/users/me", body); persisted = true; } catch {}
-    // Update token if new one is returned
-    if (apiResult?.token) localStorage.setItem("kd_token", apiResult.token);
     try {
-      const users = _getUsersStore();
-      const u = users[uid] || Object.values(users).find(u => u.username === uid);
-      if (u) {
-        for (const [k, v] of Object.entries(body)) {
-          if (k === "display_name") u.display_name = v;
-          else if (k === "photo_url") u.photo_url = v;
-          else if (k === "banner_url") u.banner_url = v;
-          else if (k === "social_links") u.social_links = v;
-          else if (k === "safety_accepted_at") u.safety_accepted_at = v;
-          else if (k === "onboarding_complete") u.onboarding_complete = v;
-          else if (k === "onboarding_questions_complete") u.onboarding_questions_complete = v;
-          else if (k === "onboard_bonus_awarded") u.onboard_bonus_awarded = v;
-          else if (k === "last_seen_date") u.last_seen_date = v;
-          else if (k === "grace_used_this_month") u.grace_used_this_month = v;
-          else if (k === "grace_last_month") u.grace_last_month = v;
-          else u[k] = v;
-        }
-        users[u.id || u.username] = u;
-        _saveUsersStore(users);
-        persisted = true;
-      }
-    } catch {}
-    return persisted;
+      const result = await _apiPatch("/api/users/me", body);
+      console.info("[Capitol] User update result", { body, result });
+      return true;
+    } catch (e) {
+      console.error("[Capitol] User update failed", body, e);
+      return false;
+    }
   }
   return true;
 }
@@ -447,7 +351,7 @@ async function fbGetWaitingQueueStatus() {
     const res = await _apiGet("/api/waiting-queue/status");
     return res;
   } catch (e) {
-    return { inQueue: false, entry: null, queueSize: 0 };
+    return { inQueue: false, entry: null, queueSize: 0, error: e.message };
   }
 }
 
@@ -478,23 +382,8 @@ async function fbGetProofs(uid, limit = 1000) {
       votes: (() => { try { return JSON.parse(p.votes || "{}"); } catch { return {}; } })(),
       gesture: p.gesture, userName: p.user_name || "", userPhoto: p.user_photo || null,
     }));
-  } catch {
-    try {
-      const all = JSON.parse(localStorage.getItem("kd_proofs") || "{}");
-      return Object.values(all)
-        .filter(p => p.userId === uid || p.user_id === uid)
-        .sort((a, b) => new Date(b.timestamp || b.created_at || 0) - new Date(a.timestamp || a.created_at || 0))
-        .slice(0, limit)
-        .map(p => ({
-          id: p.id, userId: p.userId || p.user_id, dateKey: p.dateKey || p.date_key,
-          timestamp: p.timestamp || p.created_at || new Date().toISOString(),
-          image: p.image || p.image_url, link: p.link, note: p.note,
-          streak: p.streak, xpEarned: p.xpEarned || p.xp_earned,
-          verified: true, roomId: p.roomId || p.room_id,
-          votes: p.votes || {}, gesture: p.gesture,
-          userName: p.userName || "", userPhoto: p.userPhoto || null,
-        }));
-    } catch { return []; }
+  } catch (e) {
+    return [];
   }
 }
 
@@ -506,51 +395,7 @@ async function fbSubmitProof(data) {
     });
     return { ok: true, proof: res.proof, stats: res.stats };
   } catch (e) {
-    // Fallback to localStorage only if API is completely unavailable
-    // This ensures XP is always tracked, but backend is the source of truth
-    try {
-      const uid = localStorage.getItem("kd_current_uid") || "";
-      const users = _getUsersStore();
-      const u = users[uid] || Object.values(users).find(x => x.id === uid || x.username === uid);
-      const today = new Date().toISOString().slice(0, 10);
-      const all = JSON.parse(localStorage.getItem("kd_proofs") || "{}");
-      if (Object.values(all).some(p => (p.userId || p.user_id) === uid && (p.dateKey || p.date_key) === today)) {
-        const existing = Object.values(all).find(p => (p.userId || p.user_id) === uid && (p.dateKey || p.date_key) === today);
-        return { ok: true, proof: existing, stats: { xp: u?.xp, streak: u?.streak || 0, xpGained: 0 }, duplicate: true };
-      }
-      const dates = new Set(Object.values(all).filter(p => (p.userId || p.user_id) === uid).map(p => p.dateKey || p.date_key));
-      dates.add(today);
-      let newStreak = 0;
-      const cursor = new Date(`${today}T00:00:00Z`);
-      while (dates.has(cursor.toISOString().slice(0, 10))) {
-        newStreak += 1;
-        cursor.setUTCDate(cursor.getUTCDate() - 1);
-      }
-      const xpGain = 10 + Math.min(newStreak, 30) * 2;
-      const id = "proof_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-      const proof = {
-        id, userId: uid, user_id: uid, dateKey: today, date_key: today,
-        timestamp: new Date().toISOString(), created_at: new Date().toISOString(),
-        image: data.imageUrl || data.image, image_url: data.imageUrl || data.image,
-        link: data.link, note: data.note, streak: newStreak, xpEarned: xpGain, xp_earned: xpGain,
-        verified: true, roomId: data.roomId, room_id: data.roomId, votes: {}, gesture: data.gesture,
-        userName: u?.display_name || "", userPhoto: u?.photo_url || null,
-      };
-      all[id] = proof;
-      localStorage.setItem("kd_proofs", JSON.stringify(all));
-      if (u) {
-        u.streak = newStreak;
-        u.best_streak = Math.max(u.best_streak || 0, newStreak);
-        u.xp = (u.xp || 0) + xpGain;
-        u.last_submit_date = today;
-        u.proofs_count = (u.proofs_count || 0) + 1;
-        users[u.id || u.username] = u;
-        _saveUsersStore(users);
-      }
-      return { ok: true, proof, stats: { xp: u?.xp, streak: newStreak, xpGained: xpGain } };
-    } catch {
-      return { ok: false, error: e.message };
-    }
+    return { ok: false, error: e.message || "Proof submission failed" };
   }
 }
 
@@ -563,7 +408,9 @@ async function fbGetNotifications(uid) {
       createdAt: n.created_at || new Date().toISOString(),
       data: (() => { try { return JSON.parse(n.data || "{}"); } catch { return {}; } })(),
     }));
-  } catch { return []; }
+  } catch (e) {
+    return [];
+  }
 }
 
 async function fbCreateNotification(userId, type, data) {
@@ -583,49 +430,20 @@ async function fbGetLeaderboard() {
   try {
     const res = await _apiGet("/api/leaderboard");
     return (res.leaderboard || []).map(_mapUser);
-  } catch { return []; }
+  } catch (e) {
+    return [];
+  }
 }
 
 // ── Follow ───────────────────────────────────────────────────────────────
 async function fbFollowUser(uid, targetId) {
   try { await _apiPost("/api/users/follow/" + encodeURIComponent(targetId)); return { ok: true }; }
-  catch {
-    try {
-      const users = _getUsersStore();
-      const me = users[uid] || Object.values(users).find(u => u.id === uid || u.username === uid);
-      const target = users[targetId] || Object.values(users).find(u => u.id === targetId || u.username === targetId);
-      if (!me || !target) return { ok: false };
-      const init = (target.username || "?").slice(0, 2).toUpperCase();
-      if (!Array.isArray(me.following)) me.following = [];
-      if (!me.following.includes(init)) me.following.push(init);
-      users[me.id || me.username] = me;
-      _saveUsersStore(users);
-      const follows = JSON.parse(localStorage.getItem("kd_follows") || "{}");
-      follows[me.id + "->" + target.id] = { from: me.id, to: target.id, at: new Date().toISOString() };
-      localStorage.setItem("kd_follows", JSON.stringify(follows));
-      return { ok: true };
-    } catch { return { ok: false }; }
-  }
+  catch (e) { return { ok: false, error: e.message }; }
 }
 
 async function fbUnfollowUser(uid, targetId) {
   try { await _apiDel("/api/users/follow/" + encodeURIComponent(targetId)); return { ok: true }; }
-  catch {
-    try {
-      const users = _getUsersStore();
-      const me = users[uid] || Object.values(users).find(u => u.id === uid || u.username === uid);
-      const target = users[targetId] || Object.values(users).find(u => u.id === targetId || u.username === targetId);
-      if (!me) return { ok: false };
-      const init = (target?.username || "?").slice(0, 2).toUpperCase();
-      me.following = (me.following || []).filter(x => x !== init);
-      users[me.id || me.username] = me;
-      _saveUsersStore(users);
-      const follows = JSON.parse(localStorage.getItem("kd_follows") || "{}");
-      if (target) delete follows[me.id + "->" + target.id];
-      localStorage.setItem("kd_follows", JSON.stringify(follows));
-      return { ok: true };
-    } catch { return { ok: false }; }
-  }
+  catch (e) { return { ok: false, error: e.message }; }
 }
 
 // ── Referral ─────────────────────────────────────────────────────────────
@@ -633,21 +451,27 @@ async function fbGetInviterByCode(code) {
   try {
     const res = await _apiGet("/api/referrals/code/" + encodeURIComponent(code));
     return res.inviter ? _mapUser(res.inviter) : null;
-  } catch { return null; }
+  } catch (e) {
+    return null;
+  }
 }
 
 async function fbProcessReferral(inviterId, inviteeId) {
   try {
     const res = await _apiPost("/api/referrals/process", { inviterId, inviteeId });
     return { ok: true, xpBonus: res.xpBonus || 0, milestoneBonus: res.milestoneBonus || 0 };
-  } catch { return { ok: false }; }
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 async function fbActivateGrace(uid, { days, reason }) {
   try {
     const res = await _apiPost("/api/grace/activate", { days, reason });
     return { ok: true, days: res.days, xpCost: res.xpCost, streak: res.streak };
-  } catch { return { ok: false }; }
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 // ── Challenges ───────────────────────────────────────────────────────────
@@ -694,13 +518,6 @@ function lsGet(key) {
 }
 function lsSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
-
-function _getUsersStore() {
-  try { return JSON.parse(localStorage.getItem("kd_users") || "{}"); } catch { return {}; }
-}
-function _saveUsersStore(u) {
-  try { localStorage.setItem("kd_users", JSON.stringify(u)); } catch {}
 }
 
 // ── KDSound ──────────────────────────────────────────────────────────────
@@ -888,22 +705,10 @@ async function fbSendChallenge({ fromUid, toUid, durationDays, stakes, message }
 }
 
 async function fbGetChallengesForUser(uid) {
-  try { const res = await _apiGet("/api/challenges"); return res.challenges || []; } catch { return []; }
+  try { const res = await _apiGet("/api/challenges"); return res.challenges || []; } catch (e) { return []; }
 }
 
 // ── Close Friends ──────────────────────────────────────────────────────
-function _getCloseFriendsStore() {
-  try { return JSON.parse(localStorage.getItem("kd_close_friends") || "{}"); } catch { return {}; }
-}
-function _saveCloseFriendsStore(v) {
-  try { localStorage.setItem("kd_close_friends", JSON.stringify(v)); } catch {}
-}
-function _getCloseFriendRequestsStore() {
-  try { return JSON.parse(localStorage.getItem("kd_close_friend_requests") || "{}"); } catch { return {}; }
-}
-function _saveCloseFriendRequestsStore(v) {
-  try { localStorage.setItem("kd_close_friend_requests", JSON.stringify(v)); } catch {}
-}
 
 async function fbGetCloseFriends() {
   const res = await _apiGet("/api/close-friends");
@@ -932,7 +737,7 @@ async function fbRemoveCloseFriend(friendId) {
 
 // ── Economy / Freeze Tokens ──────────────────────────────────────────
 async function fbListFreezeTokens() {
-  try { const res = await _apiGet("/api/economy/freeze-tokens"); return res.tokens || []; } catch { return []; }
+  try { const res = await _apiGet("/api/economy/freeze-tokens"); return res.tokens || []; } catch (e) { return []; }
 }
 async function fbBuyFreezeToken() {
   try { const res = await _apiPost("/api/economy/buy-freeze"); return res; } catch (e) { return { error: e }; }
@@ -945,7 +750,6 @@ export {
   _API,
   _tok, _h, _api, _apiGet, _apiPost, _apiPatch, _apiDel, _mapUser,
   _getActiveRoomIdForUser,
-  _getUsersStore, _saveUsersStore,
   fbSignup, fbLogin, fbLogout, fbDeleteAccount, fbCheckUserId,
   fbGetUser, fbGetAllUsers, fbUpdateUser,
   fbGetRooms, fbGetRoomById, fbGetMyRoom, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,

@@ -1,168 +1,128 @@
 import crypto from 'crypto';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { createClient } from '@supabase/supabase-js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Supabase Storage configuration
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Storage abstraction for uploads
-// Supports both local filesystem (dev) and S3-compatible storage (production)
+if (!supabaseUrl || !supabaseServiceKey) {
+  console.error('❌ CRITICAL: Supabase credentials not found for storage.');
+  console.error('❌ Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
+  throw new Error('Supabase credentials are required for storage.');
+}
+
+// Create Supabase client with service role key
+const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false
+  }
+});
 
 class StorageProvider {
   constructor() {
-    // Default to local filesystem for development
-    this.provider = process.env.STORAGE_PROVIDER || 'local';
-    this.bucket = process.env.S3_BUCKET || 'capitol-uploads';
-    this.region = process.env.S3_REGION || 'us-east-1';
-    this.accessKeyId = process.env.S3_ACCESS_KEY_ID;
-    this.secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
-    this.endpoint = process.env.S3_ENDPOINT;
-    
-    // Initialize S3 client if credentials are available
-    this.s3Client = null;
-    if (this.provider === 's3' && this.accessKeyId && this.secretAccessKey && this.accessKeyId !== 'placeholder') {
-      try {
-        const s3Config = {
-          region: this.region,
-          credentials: {
-            accessKeyId: this.accessKeyId,
-            secretAccessKey: this.secretAccessKey,
-          },
-        };
-        
-        // Add custom endpoint if provided (for S3-compatible services)
-        if (this.endpoint) {
-          s3Config.endpoint = this.endpoint;
-        }
-        
-        this.s3Client = new S3Client(s3Config);
-        console.log('[Storage] S3 client initialized');
-      } catch (error) {
-        console.error('[Storage] Failed to initialize S3 client:', error);
-        console.warn('[Storage] Falling back to local filesystem storage');
-        this.provider = 'local';
-      }
-    } else if (this.provider === 's3') {
-      console.warn('[Storage] S3 credentials not properly configured, using local filesystem storage');
-      this.provider = 'local';
-    }
-    
-    // Ensure upload directory exists for local storage
-    this.uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
-    if (this.provider === 'local') {
-      try {
-        if (!fs.existsSync(this.uploadDir)) {
-          fs.mkdirSync(this.uploadDir, { recursive: true });
-          console.log('[Storage] Created upload directory:', this.uploadDir);
-        }
-      } catch (error) {
-        console.error('[Storage] Failed to create upload directory:', error);
-      }
-    }
-    
-    console.log('[Storage] Initialized with provider:', this.provider, 'uploadDir:', this.uploadDir);
+    this.buckets = {
+      profilePictures: 'profile-pictures',
+      banners: 'banners',
+      proofs: 'proofs',
+      uploads: 'uploads'
+    };
+    console.log('[Storage] Initialized with Supabase Storage');
   }
 
-  async uploadFile(file, key) {
-    console.log('[Storage] Starting file upload', { key, mimetype: file.mimetype, size: file.size });
+  async uploadFile(file, key, bucket = 'uploads') {
+    console.log('[Storage] Starting file upload', { key, mimetype: file.mimetype, size: file.size, bucket });
     
-    if (this.provider === 's3' && this.s3Client) {
-      return this.uploadToS3(file, key);
-    } else {
-      return this.uploadToLocal(file, key);
-    }
-  }
-
-  async uploadToS3(file, key) {
     try {
       const buffer = Buffer.from(await file.arrayBuffer());
+      const fileName = key;
       
-      const command = new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: buffer,
-        ContentType: file.mimetype,
-      });
+      const { data, error } = await supabase
+        .storage
+        .from(bucket)
+        .upload(fileName, buffer, {
+          contentType: file.mimetype,
+          upsert: true
+        });
       
-      await this.s3Client.send(command);
+      if (error) {
+        console.error('[Storage] Supabase upload failed:', error);
+        throw new Error(`Upload failed: ${error.message}`);
+      }
       
-      // Return S3 public URL
-      const publicUrl = `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
-      console.log('[Storage] File uploaded to S3', { key, size: buffer.length, publicUrl });
+      // Get public URL
+      const { data: { publicUrl } } = supabase
+        .storage
+        .from(bucket)
+        .getPublicUrl(fileName);
+      
+      console.log('[Storage] File uploaded to Supabase Storage', { key, size: buffer.length, publicUrl });
       return publicUrl;
     } catch (error) {
-      console.error('[Storage] S3 upload failed:', error);
-      console.warn('[Storage] Falling back to local filesystem storage');
-      return this.uploadToLocal(file, key);
+      console.error('[Storage] Upload failed:', error);
+      throw error;
     }
   }
 
-  async uploadToLocal(file, key) {
+  async deleteFile(key, bucket = 'uploads') {
     try {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const filePath = path.join(this.uploadDir, key);
+      const { error } = await supabase
+        .storage
+        .from(bucket)
+        .remove([key]);
       
-      // Write file to disk
-      fs.writeFileSync(filePath, buffer);
-      
-      // Return the relative path that can be served via Express static files
-      const publicUrl = `/uploads/${key}`;
-      console.log('[Storage] File saved to filesystem', { filePath, size: buffer.length, publicUrl });
-      return publicUrl;
-    } catch (error) {
-      console.error('[Storage] Failed to save file to filesystem:', error);
-      throw new Error('Failed to save file: ' + error.message);
-    }
-  }
-
-  async deleteFile(key) {
-    if (this.provider === 's3' && this.s3Client) {
-      return this.deleteFromS3(key);
-    } else {
-      return this.deleteFromLocal(key);
-    }
-  }
-
-  async deleteFromS3(key) {
-    try {
-      const command = new DeleteObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-      });
-      
-      await this.s3Client.send(command);
-      console.log('[Storage] File deleted from S3', { key });
-    } catch (error) {
-      console.error('[Storage] S3 deletion failed:', error);
-    }
-  }
-
-  async deleteFromLocal(key) {
-    try {
-      const filePath = path.join(this.uploadDir, key);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        console.log('[Storage] Deleted file from filesystem', { key });
+      if (error) {
+        console.error('[Storage] Supabase deletion failed:', error);
+      } else {
+        console.log('[Storage] File deleted from Supabase Storage', { key });
       }
     } catch (error) {
-      console.error('[Storage] Failed to delete file from filesystem:', error);
+      console.error('[Storage] Failed to delete file:', error);
     }
   }
 
   generateKey(filename) {
-    const ext = path.extname(filename);
+    const ext = filename.split('.').pop();
     const randomName = crypto.randomBytes(16).toString('hex');
-    return `${randomName}${ext}`;
+    return `${randomName}.${ext}`;
   }
 
-  getPublicUrl(key) {
-    if (this.provider === 's3') {
-      // Return S3 public URL
-      return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
-    } else {
-      // For local filesystem storage, return the path
-      return `/uploads/${key}`;
+  getPublicUrl(key, bucket = 'uploads') {
+    const { data } = supabase
+      .storage
+      .from(bucket)
+      .getPublicUrl(key);
+    return data.publicUrl;
+  }
+
+  // Ensure buckets exist
+  async ensureBuckets() {
+    const requiredBuckets = Object.values(this.buckets);
+    
+    for (const bucket of requiredBuckets) {
+      try {
+        const { data, error } = await supabase
+          .storage
+          .getBucket(bucket);
+        
+        if (error) {
+          console.log(`[Storage] Creating bucket: ${bucket}`);
+          const { error: createError } = await supabase
+            .storage
+            .createBucket(bucket, {
+              public: true,
+              fileSizeLimit: 10485760 // 10MB
+            });
+          
+          if (createError) {
+            console.error(`[Storage] Failed to create bucket ${bucket}:`, createError);
+          } else {
+            console.log(`[Storage] Created bucket: ${bucket}`);
+          }
+        }
+      } catch (error) {
+        console.error(`[Storage] Error checking bucket ${bucket}:`, error);
+      }
     }
   }
 }
