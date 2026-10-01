@@ -6,10 +6,11 @@ const build = spawnSync(npm, ["run", "build"], { stdio: "inherit", env: process.
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 const children = [
-  spawn(npm, ["run", "start:api"], { stdio: "inherit", env: process.env }),
+  spawn(npm, ["run", "start:api"], { stdio: "inherit", env: process.env, shell: true }),
   spawn(npm, ["exec", "--", "vite", "preview", "--host", "0.0.0.0", "--port", "4173"], {
     stdio: "inherit",
     env: process.env,
+    shell: true,
   }),
 ];
 

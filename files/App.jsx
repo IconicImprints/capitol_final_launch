@@ -7,7 +7,7 @@ import {
   fbGetJoinCooldown, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbSubmitProof, fbGetProofs,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
-  fbGetLeaderboard,
+  fbGetLeaderboard, fbGetTrendingRooms,
   fbFollowUser, fbUnfollowUser,
   fbGetInviterByCode, fbProcessReferral, fbActivateGrace,
   fbSendChallenge, fbGetChallengesForUser,
@@ -1168,7 +1168,7 @@ async function fbCastSessionVote(s,v,vote){return{ok:true};}
 async function fbCreateSessionRecord(s,d){return{ok:true};}
 async function fbEvaluateSessionVotes(s,r){return{verdict:"pass",votes:{}};}
 async function fbSetPremium(uid,v){const users=_getUsersStore();if(users[uid]){users[uid].premium=v;_saveUsersStore(users);}return{ok:true};}
-async function fbUpdateStreakXP(uid,{newStreak,xpGain,newXP,newLevel,today}){const users=_getUsersStore();if(!users[uid])return;Object.assign(users[uid],{streak:newStreak,xp:newXP,level:newLevel,lastSubmissionDate:today,lastSubmitDate:today});_saveUsersStore(users);try{await _apiPatch("/api/users/me",{streak:newStreak,xp:newXP,level:newLevel,lastSubmitDate:today});}catch{}}
+async function fbUpdateStreakXP(uid,{newStreak,xpGain,newXP,newLevel,today}){const users=_getUsersStore();if(users[uid]){Object.assign(users[uid],{streak:newStreak,xp:newXP,level:newLevel,lastSubmissionDate:today,lastSubmitDate:today});_saveUsersStore(users);}try{await _apiPatch("/api/users/me",{streak:newStreak,xp:newXP,level:newLevel,lastSubmitDate:today});}catch(e){console.warn("[Proof] backend sync failed",e);}}
 async function runAIReferee(proof){return{verdict:"approved",reason:"AI passed",safe:true};}
 async function apiPost(path,body){return{ok:true};}
 function loadSocketIO(cb){}
@@ -5016,17 +5016,26 @@ function PersonProfileModal({ person, open, onClose, following, onFollow }) {
 }
 
 function SearchView({ rooms = [], joinedRoom, onJoin, profile, following, onFollow, setView, me, onInviteToRoom, allUsers = [] }) {
-  // BUG FIX: Build people list from the full allUsers array (all registered users).
-  // We also run a live DB query on each search so users registered after page load,
-  // or beyond any load cap, are still found correctly.
   const realPeople = buildPeopleData(me?.userId, allUsers);
   const { T } = useTheme();
   const [query, setQuery] = useState("");
   const [viewedPerson, setViewedPerson] = useState(null);
-  const [liveResults, setLiveResults] = useState(null); // null = use allUsers list
+  const [liveResults, setLiveResults] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [topUsers, setTopUsers] = useState([]);
+  const [trendingRooms, setTrendingRooms] = useState([]);
 
-  // Live DB search — fires whenever query changes to catch every registered user
+  useEffect(() => {
+    let cancelled = false;
+    fbGetLeaderboard(3).then(users => {
+      if (!cancelled) setTopUsers(users || []);
+    }).catch(() => {});
+    fbGetTrendingRooms(4).then(rooms => {
+      if (!cancelled) setTrendingRooms(rooms || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     if (!query.trim()) { setLiveResults(null); setSearching(false); return; }
     let cancelled = false;
@@ -5044,7 +5053,6 @@ function SearchView({ rooms = [], joinedRoom, onJoin, profile, following, onFoll
     return () => { cancelled = true; };
   }, [query, me?.userId]);
 
-  // Prefer live results when available; fall back to pre-loaded list
   const filteredPeople = query
     ? (liveResults !== null
         ? liveResults
@@ -5052,9 +5060,9 @@ function SearchView({ rooms = [], joinedRoom, onJoin, profile, following, onFoll
             (p.name || "").toLowerCase().includes(query.toLowerCase()) ||
             (p.username || "").toLowerCase().includes(query.toLowerCase())
           ))
-    : realPeople;
+    : [];
   const safeRooms = Array.isArray(rooms) ? rooms : [];
-  const filteredRooms = query ? safeRooms.filter(r => (r.name||"").toLowerCase().includes(query.toLowerCase()) || (r.goal||"").toLowerCase().includes(query.toLowerCase())) : safeRooms;
+  const filteredRooms = query ? safeRooms.filter(r => (r.name||"").toLowerCase().includes(query.toLowerCase()) || (r.goal||"").toLowerCase().includes(query.toLowerCase())) : [];
   return (
     <div className="kd-view" style={{ padding: "28px 28px" }}>
       <h1 style={{ fontWeight: 600, fontSize: 20, color: T.text, marginBottom: 20 }}>Search</h1>
@@ -5063,62 +5071,109 @@ function SearchView({ rooms = [], joinedRoom, onJoin, profile, following, onFoll
         <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search people, rooms, goals…" autoFocus style={{ flex: 1, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 15, color: T.text }} />
         {query && <button onClick={() => setQuery("")} style={{ background: "none", border: "none", cursor: "pointer", color: T.textFaint, fontSize: 16 }}>×</button>}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>People</div>
-        {searching && <span style={{ fontSize: 11, color: T.textFaint }}>Searching…</span>}
-        {!searching && query && liveResults !== null && (
-          <span style={{ fontSize: 11, color: T.textFaint }}>{filteredPeople.length} result{filteredPeople.length !== 1 ? "s" : ""}</span>
-        )}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
-        {filteredPeople.length === 0 && !searching && query && (
-          <div style={{ fontSize: 13, color: T.textFaint, padding: "12px 0", textAlign: "center" }}>
-            No users found matching "{query}"</div>
-        )}
-        {filteredPeople.length === 0 && !searching && !query && (
-          <div style={{ fontSize: 13, color: T.textFaint, padding: "24px 12px", textAlign: "center", border: `1px dashed ${T.border}`, borderRadius: 10 }}>
-            No other registered users yet. When someone signs up, they'll show up here.
+
+      {!query && (
+        <>
+          <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>Top 3 of the day</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
+            {topUsers.length === 0 && (
+              <div style={{ fontSize: 13, color: T.textFaint, padding: "12px 0", textAlign: "center" }}>No users yet.</div>
+            )}
+            {topUsers.map((p, idx) => {
+              const isFollowing = following.includes(p.init);
+              return (
+                <div key={p.init} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, minHeight: 60 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: T.textMuted, width: 22, textAlign: "center", flexShrink: 0 }}>#{idx + 1}</span>
+                  <span onClick={() => setViewedPerson(p)} style={{ cursor: "pointer", flexShrink: 0 }}><Avatar name={p.displayName} photo={p.photo} size={38} color={p.color} username={p.username} /></span>
+                  <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setViewedPerson(p)}>
+                    <div style={{ fontWeight: 500, fontSize: 14, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.displayName}</div>
+                    <div style={{ fontSize: 12, color: T.textFaint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>@{p.username} · Lv.{p.level ?? 1}</div>
+                  </div>
+                  <span style={{ fontSize: 12, color: T.textFaint, width: 52, flexShrink: 0, textAlign: "right", whiteSpace: "nowrap", display:"inline-flex", alignItems:"center", gap:2 }}><KDFlame size={12} animate={false}/>{p.streak ?? 0}d</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    <Btn size="sm" variant={isFollowing ? "ghost" : "primary"} onClick={() => onFollow(p.init)} style={{ minWidth: 78, textAlign: "center" }}>
+                      {isFollowing ? "Following" : "+ Follow"}
+                    </Btn>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        )}
-        {filteredPeople.map(p => {
-          const isFollowing = following.includes(p.init);
-          return (
-            <div key={p.init} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, minHeight: 60 }}>
-              {/* Avatar */}
-              <span onClick={() => setViewedPerson(p)} style={{ cursor: "pointer", flexShrink: 0 }}><Avatar name={p.name} size={38} color={p.color} username={p.username} /></span>
-              {/* Main content — flex:1, truncates */}
-              <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setViewedPerson(p)}>
-                <div style={{ fontWeight: 500, fontSize: 14, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
-                <div style={{ fontSize: 12, color: T.textFaint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>@{p.username} · {p.room}</div>
+
+          <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>Trending rooms</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+            {trendingRooms.length === 0 && (
+              <div style={{ fontSize: 13, color: T.textFaint, padding: "12px 0", textAlign: "center", gridColumn: "1 / -1" }}>No trending rooms yet.</div>
+            )}
+            {trendingRooms.slice(0, 4).map(r => (
+              <div key={r.id} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{display:"inline-flex",alignItems:"center"}}><KDGoalIcon goalKey={r.goalKey||r.icon||""} size={22}/></span>
+                </div>
+                <div style={{ fontWeight: 500, fontSize: 13, color: T.text, marginBottom: 3 }}>{r.name || `Room ${String(r.id).slice(-4)}`}</div>
+                <div style={{ fontSize: 12, color: T.textFaint, marginBottom: 10 }}>{r.goal || "Daily accountability"}</div>
+                {joinedRoom?.id !== r.id && (r.members ?? 0) < (r.max ?? 8) && <Btn size="sm" variant="primary" style={{ width: "100%" }} onClick={() => onJoin(r)}>Join room</Btn>}
+                {joinedRoom?.id === r.id && <Tag color="yellow">Joined</Tag>}
               </div>
-              {/* Streak — fixed 52px so it aligns across all rows */}
-              <span style={{ fontSize: 12, color: T.textFaint, width: 52, flexShrink: 0, textAlign: "right", whiteSpace: "nowrap", display:"inline-flex", alignItems:"center", gap:2 }}><KDFlame size={12} animate={false}/>{p.streak}d</span>
-              {/* Actions — fixed widths so columns stay straight */}
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                <Btn size="sm" variant={isFollowing ? "ghost" : "primary"} onClick={() => onFollow(p.init)}
-                  style={{ minWidth: 78, textAlign: "center" }}>
-                  {isFollowing ? "Following" : "+ Follow"}
-                </Btn>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>Rooms</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        {filteredRooms.slice(0, 4).map(r => (
-          <div key={r.id} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "12px 14px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              {/* BUG FIX #8: icon/name/goal fallbacks in search room cards */}
-              <span style={{display:"inline-flex",alignItems:"center"}}><KDGoalIcon goalKey={r.goalKey||""} size={22}/></span>
-            </div>
-            <div style={{ fontWeight: 500, fontSize: 13, color: T.text, marginBottom: 3 }}>{r.name || `Room ${String(r.id).slice(-4)}`}</div>
-            <div style={{ fontSize: 12, color: T.textFaint, marginBottom: 10 }}>{r.goal || "Daily accountability"}</div>
-            {joinedRoom?.id !== r.id && (r.members ?? 0) < (r.max ?? 8) && <Btn size="sm" variant="primary" style={{ width: "100%" }} onClick={() => onJoin(r)}>Join room</Btn>}
-            {joinedRoom?.id === r.id && <Tag color="yellow">Joined</Tag>}
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
+
+      {query && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>People</div>
+            {searching && <span style={{ fontSize: 11, color: T.textFaint }}>Searching…</span>}
+            {!searching && liveResults !== null && (
+              <span style={{ fontSize: 11, color: T.textFaint }}>{filteredPeople.length} result{filteredPeople.length !== 1 ? "s" : ""}</span>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
+            {filteredPeople.length === 0 && !searching && query && (
+              <div style={{ fontSize: 13, color: T.textFaint, padding: "12px 0", textAlign: "center" }}>
+                No users found matching "{query}"</div>
+            )}
+            {filteredPeople.length === 0 && !searching && !query && (
+              <div style={{ fontSize: 13, color: T.textFaint, padding: "24px 12px", textAlign: "center", border: `1px dashed ${T.border}`, borderRadius: 10 }}>
+                No other registered users yet. When someone signs up, they'll show up here.
+              </div>
+            )}
+            {filteredPeople.map(p => {
+              const isFollowing = following.includes(p.init);
+              return (
+                <div key={p.init} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, minHeight: 60 }}>
+                  <span onClick={() => setViewedPerson(p)} style={{ cursor: "pointer", flexShrink: 0 }}><Avatar name={p.displayName} photo={p.photo} size={38} color={p.color} username={p.username} /></span>
+                  <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setViewedPerson(p)}>
+                    <div style={{ fontWeight: 500, fontSize: 14, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.displayName}</div>
+                    <div style={{ fontSize: 12, color: T.textFaint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>@{p.username} · Lv.{p.level ?? 1}</div>
+                  </div>
+                  <span style={{ fontSize: 12, color: T.textFaint, width: 52, flexShrink: 0, textAlign: "right", whiteSpace: "nowrap", display:"inline-flex", alignItems:"center", gap:2 }}><KDFlame size={12} animate={false}/>{p.streak ?? 0}d</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    <Btn size="sm" variant={isFollowing ? "ghost" : "primary"} onClick={() => onFollow(p.init)} style={{ minWidth: 78, textAlign: "center" }}>
+                      {isFollowing ? "Following" : "+ Follow"}
+                    </Btn>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontWeight: 500, fontSize: 13, color: T.textMuted, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>Rooms</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {filteredRooms.slice(0, 4).map(r => (
+              <div key={r.id} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{display:"inline-flex",alignItems:"center"}}><KDGoalIcon goalKey={r.goalKey||r.icon||""} size={22}/></span>
+                </div>
+                <div style={{ fontWeight: 500, fontSize: 13, color: T.text, marginBottom: 3 }}>{r.name || `Room ${String(r.id).slice(-4)}`}</div>
+                <div style={{ fontSize: 12, color: T.textFaint, marginBottom: 10 }}>{r.goal || "Daily accountability"}</div>
+                {joinedRoom?.id !== r.id && (r.members ?? 0) < (r.max ?? 8) && <Btn size="sm" variant="primary" style={{ width: "100%" }} onClick={() => onJoin(r)}>Join room</Btn>}
+                {joinedRoom?.id === r.id && <Tag color="yellow">Joined</Tag>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <PersonProfileModal person={viewedPerson} open={!!viewedPerson} onClose={() => setViewedPerson(null)} following={following} onFollow={onFollow} />
     </div>
   );
@@ -7777,16 +7832,6 @@ function UserProfileCard({ user, onClose, reporterUid, isSelf = false, onFollow,
           >{isFollowing ? "Following" : "Follow"}</button>
         )}
         {!isSelf && (
-          <button onClick={() => {
-            if (showToast) showToast(`DM to ${user.name} opened`, "success");
-          }} style={{
-            flex:1, padding:"11px 16px", borderRadius:12,
-            border:`1px solid ${T.border}`, background:"transparent",
-            color:T.text, fontFamily:"inherit", fontSize:13, fontWeight:600, cursor:"pointer",
-            transition:"all 0.15s",
-          }}>Message</button>
-        )}
-        {!isSelf && (
           <button onClick={() => setReportOpen(true)} style={{
             width:40, borderRadius:12, border:`1px solid ${T.isDark?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.06)"}`,
             background:"transparent", color:T.textMuted, cursor:"pointer", display:"flex",
@@ -9612,7 +9657,7 @@ function OnboardingFlow({ userData, rooms: roomsProp = [], onComplete }) {
       { pct:100, txt:"You're in!" },
     ];
     for (const s of steps) {
-      await new Promise(r => setTimeout(r, 340 + Math.random()*220));
+      await new Promise(r => setTimeout(r, 120 + Math.random()*80));
       setProgress(s.pct); setMatchTxt(s.txt);
     }
     const allRooms = (roomsProp || []).map(r=>({...r}));
@@ -9639,7 +9684,7 @@ function OnboardingFlow({ userData, rooms: roomsProp = [], onComplete }) {
       await fbUpdateUser(userData.uid, { niche, ageRange:age, onboardingComplete:true, onboardingQuestionsComplete:true, joinTimestamp:new Date().toISOString(), roomJoinedAt, roomId: best.id }).catch(()=>{});
     }
     setMatchedRoom(best); setPhase("done");
-    setTimeout(()=>onComplete({room:best,isNew,niche,ageRange:age}),1200);
+    setTimeout(()=>onComplete({room:best,isNew,niche,ageRange:age}),400);
   }
 
 
@@ -9723,6 +9768,9 @@ function OnboardingFlow({ userData, rooms: roomsProp = [], onComplete }) {
           </div>
         )}
         <div style={{fontSize:13,color:C.muted, marginBottom:14}}>Entering your room…</div>
+        <button onClick={()=>onComplete({room:matchedRoom,isNew:matchedRoom&&!roomsProp?.some(r=>r.id===matchedRoom.id),niche:selNiche,ageRange:selAge})} style={{width:"100%",padding:"14px 20px",borderRadius:12,background:C.black,color:"#fff",border:"none",fontWeight:700,fontSize:15,cursor:"pointer",fontFamily:FONT,transition:"transform 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-1px)";}} onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
+          Continue to Room →
+        </button>
         <DiscordCTA variant="banner" />
       </div>
     </AuthSplitLayout>
@@ -9959,15 +10007,14 @@ function LandingPage({ onEnter }) {
   }
 
   // ── ONBOARDING COMPLETE ────────────────────────────────────────────────────
-  async function handleOnboardingComplete(matchResult) {
-    // NOTE: room creation/joining and the onboardingComplete/joinTimestamp user
-    // update are already performed inside OnboardingFlow.startMatching before
-    // onComplete() is invoked. Re-running fbCreateRoom/fbJoinRoom here used to
-    // create a second room record (or overwrite the freshly-joined room's
-    // membersList/memberUids back to empty), which caused the "wrong room" /
-    // mismatched room name bug after onboarding. Just transition into the app.
-    // The user's room will be fetched from the backend via fbGetMyRoom() on app load.
-    onEnter("signup", { isNewUser: true, user: pendingUser, invitedBy: pendingUser?.invitedBy || null });
+  function handleOnboardingComplete(matchResult) {
+    const userData = pendingUser;
+    if (!userData) {
+      showToast && showToast("Session lost. Please sign up again.", "error");
+      setScreen("signup");
+      return;
+    }
+    onEnter("signup", { isNewUser: true, user: userData, invitedBy: pendingUser?.invitedBy || null });
   }
 
   // ── ONBOARDING SCREEN ──────────────────────────────────────────────────────
@@ -10105,7 +10152,7 @@ function LandingPage({ onEnter }) {
           </p>
           <div className="kd-h3 kd-hero-btns" style={{ display:"flex", gap:12, justifyContent:"center", flexWrap:"wrap" }}>
             <button className="kd-btn-primary" onClick={() => { resetForm(); setScreen("signup"); }}>start your room →</button>
-            <button className="kd-btn-ghost" onClick={() => window.open("https://discord.com/invite/nSE28B9mr9","_blank")}>
+            <button className="kd-btn-ghost" onClick={() => window.open(DISCORD_INVITE_URL,"_blank")}>
               <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.001.016.01.032.021.041a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
               join discord
             </button>
@@ -10258,7 +10305,7 @@ function LandingPage({ onEnter }) {
             <h2 style={{ fontSize:"clamp(26px,4vw,48px)", fontWeight:700, letterSpacing:"-0.04em", lineHeight:1.1, color:"#f0f6fc", marginBottom:16, maxWidth:520 }}>build consistency with people who care.</h2>
             <p style={{ fontSize:15, color:"#8b949e", maxWidth:480, marginBottom:36, lineHeight:1.65, letterSpacing:"-0.01em" }}>a shared space to interact, share progress, and stay accountable. capitol discord brings real-time accountability, community challenges, announcements, and direct communication between users.</p>
             <div style={{ display:"flex", gap:12, flexWrap:"wrap", justifyContent:"center" }}>
-              <button className="kd-btn-ghost" style={{ padding:"12px 32px" }} onClick={() => window.open("https://discord.com/invite/nSE28B9mr9","_blank")}>
+              <button className="kd-btn-ghost" style={{ padding:"12px 32px" }} onClick={() => window.open(DISCORD_INVITE_URL,"_blank")}>
                 <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.001.016.01.032.021.041a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
                 join discord
               </button>
@@ -10285,7 +10332,7 @@ function LandingPage({ onEnter }) {
             </p>
             <div style={{ display:"flex", gap:12, justifyContent:"center", flexWrap:"wrap", position:"relative" }}>
               <button className="kd-btn-primary" style={{ padding:"14px 32px", fontSize:15 }} onClick={() => { resetForm(); setScreen("signup"); }}>start your room →</button>
-              <button className="kd-btn-ghost" style={{ padding:"14px 32px", fontSize:15 }} onClick={() => window.open("https://discord.com/invite/nSE28B9mr9","_blank")}>join discord</button>
+              <button className="kd-btn-ghost" style={{ padding:"14px 32px", fontSize:15 }} onClick={() => window.open(DISCORD_INVITE_URL,"_blank")}>join discord</button>
             </div>
           </div>
         </div>
@@ -10312,7 +10359,7 @@ function LandingPage({ onEnter }) {
                 <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
                   {col.links.map(([label,target]) => (
                     <span key={label} className="kd-footer-link" onClick={() => {
-                      if (target==="discord-ext") window.open("https://discord.com/invite/nSE28B9mr9","_blank");
+                      if (target==="discord-ext") window.open(DISCORD_INVITE_URL,"_blank");
                       else if (target==="insta-ext") window.open("https://www.instagram.com/capitol_official/","_blank");
                       else if (["privacy","terms","guidelines","safety"].includes(target)) setLegalModal(target);
                       else scrollTo(target);
@@ -13707,26 +13754,38 @@ function GuidedTourOverlay({ step, targetStep, onNext, onSkip, total }) {
 
 function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
   const { playWave } = useAnimationQueue();
-  const [fbData, setFbData] = useState(null); // raw Firestore user doc
+  const [fbData, setFbData] = useState(null); // raw backend user doc
   const [fbLoading, setFbLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
-  // Subscribe to live user doc
+  // Load user directly from backend API (Supabase, not Firestore).
+  // Firestore is no longer the source of truth; the backend writes to PostgreSQL.
+  useEffect(() => {
+    if (!firebaseUid) return;
+    let cancelled = false;
+    setLoadError(null);
+    fbGetUser(firebaseUid).then(user => {
+      if (cancelled) return;
+      if (user) {
+        setFbData({ ...user });
+      } else {
+        setLoadError('User not found. Please sign up again.');
+      }
+      setFbLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setLoadError('Cannot reach the server. Make sure the backend is running on port 3001.');
+      setFbLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [firebaseUid]);
+
   // Daily reset: runs on mount and every 60s
   useEffect(() => {
     runDailyResetIfNeeded();
     const resetId = setInterval(runDailyResetIfNeeded, 60000);
     return () => clearInterval(resetId);
   }, []);
-
-    useEffect(() => {
-    if (!firebaseUid) return;
-    const unsub = fbSubscribeUser(firebaseUid, user => {
-      if (user) setFbData({ ...user });
-      setFbLoading(false);
-    });
-    setFbLoading(false);
-    return unsub;
-  }, [firebaseUid]);
 
   // Show "You were invited by ...!" toast once on mount
   const invitedShownRef = useRef(false);
@@ -14694,16 +14753,18 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
 
     // ── 4. Update streak state ────────────────────────────────────────────────────
     markProofSubmitted();
-    // Reconcile from the persisted server record; never retain an optimistic
-    // value that is higher than the source-of-truth history.
+    // Optimistically set streak/XP now for instant UI feedback, then reconcile
+    // from the persisted server record after the backend update completes.
     if (uid) {
-      setTimeout(() => {
-        fbGetUser(uid).then(fresh => {
+      (async () => {
+        try {
+          await fbUpdateStreakXP(uid, { newStreak, xpGain: xpGain + onboardBonus, newXP, newLevel, today });
+          const fresh = await fbGetUser(uid);
           if (!fresh) return;
           const lastDate = fresh.lastSubmissionDate || fresh.lastSubmitDate || null;
           manualSet(prev => ({
             ...prev,
-            streak:             fresh.streak ?? 0,
+            streak:             fresh.streak ?? prev.streak,
             lastSubmitDate:     lastDate || prev.lastSubmitDate,
             lastSubmissionDate: lastDate || prev.lastSubmissionDate,
             missedDays:         fresh.missedDays        ?? prev.missedDays,
@@ -14713,8 +14774,10 @@ function CapitolApp({ firebaseUid, onLogout, invitedBy }) {
             xp:                 fresh.xp ?? prev.xp,
             level:             fresh.level ?? prev.level,
           }));
-        }).catch(() => {});
-      }, 500);
+        } catch (e) {
+          console.warn('[Proof] backend sync failed, keeping optimistic state', e);
+        }
+      })();
     }
 
     // ── 5. Award XP → Firestore ───────────────────────────────────────────────────
@@ -15076,24 +15139,44 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
 
 
   // ── Onboarding gate ─────────────────────────────────────────────────────────
+  const onboardingComplete = fbData?.onboardingComplete === true || (() => { try { const s = localStorage.getItem(LS_KEYS.session); if (!s) return false; const parsed = JSON.parse(s); return parsed.onboardingComplete === true || parsed.onboarding_complete === true; } catch { return false; } })();
   if (fbLoading) {
     return <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#0a0a0f", color:"#f4f4f8", fontFamily:"system-ui", fontSize:14 }}>Loading…</div>;
   }
-  if (fbData && fbData.onboardingComplete === false) {
+  if (loadError) {
+    return (
+      <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", background:"#0a0a0f", color:"#f4f4f8", fontFamily:"system-ui", padding: 24, textAlign: "center" }}>
+        <div style={{ fontSize: 32, marginBottom: 16 }}>⚠️</div>
+        <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 8 }}>Could not load your account</div>
+        <div style={{ fontSize: 13, color:"#9ca3af", maxWidth: 420, lineHeight: 1.6, marginBottom: 20 }}>{loadError}</div>
+        <button onClick={() => { setLoadError(null); setFbLoading(true); }} style={{ padding: "10px 24px", background: "#f5c800", color: "#000", border: "none", borderRadius: 8, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Retry</button>
+      </div>
+    );
+  }
+  if (!fbData) {
+    return <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#0a0a0f", color:"#f4f4f8", fontFamily:"system-ui", fontSize: 14 }}>No account data. Please sign up again.</div>;
+  }
+  if (fbData && fbData.onboardingComplete === false && !onboardingComplete) {
     return (
       <OnboardingFlow
         userData={fbData}
         rooms={rooms || []}
         onComplete={async (matchResult) => {
-          // OnboardingFlow.startMatching has already created/joined the room and
-          // updated the user's onboardingComplete flag in the backend. Refresh
-          // local state from that same source of truth so the dashboard shows
-          // the *actual* room the user was just placed in.
-          const fresh = await fbGetUser(fbData.uid);
-          if (fresh) setFbData({ ...fresh });
-          const freshRooms = await fbGetRooms().catch(() => null);
-          if (freshRooms) setRooms(freshRooms);
-          // The user's room will be fetched from the backend via fbGetMyRoom() on app load
+          try { console.log('[Onboarding] complete payload', matchResult); } catch {}
+          try { console.log('[Onboarding] fbData before update', fbData); } catch {}
+          setFbData(prev => { const next = prev ? { ...prev, onboardingComplete: true } : prev; try { console.log('[Onboarding] fbData after optimistic update', next); } catch {} return next; });
+          try {
+            const fresh = await fbGetUser(fbData.uid);
+            try { console.log('[Onboarding] fbGetUser fresh', fresh); } catch {}
+            if (fresh) setFbData({ ...fresh });
+          } catch (e) {
+            try { console.warn('[Onboarding] fbGetUser failed', e); } catch {}
+          }
+          try {
+            const freshRooms = await fbGetRooms().catch(() => null);
+            if (freshRooms) setRooms(freshRooms);
+          } catch {}
+          try { localStorage.setItem(LS_KEYS.session, JSON.stringify({ ...fbData, onboardingComplete: true, onboarding_complete: true })); } catch {}
         }}
       />
     );
@@ -15358,9 +15441,13 @@ setProfile(prev => ({ ...prev, completedRooms: (prev.completedRooms ?? 0) + 1 })
 function AppInner() {
   const [authUser, setAuthUser] = useState(undefined);
   const [invitedBy, setInvitedBy] = useState(null);
+  const [appVersion, setAppVersion] = useState(0);
+  const justSetRef = useRef(false);
   useEffect(() => {
     const unsub = onAuthStateChanged(user => {
       if (!user) { setAuthUser(null); return; }
+      // If onEnter just set the session, trust it; otherwise verify with backend.
+      if (justSetRef.current) { justSetRef.current = false; return; }
       fbGetUser(user.uid).then(backendUser => {
         if (backendUser) { setAuthUser(user); return; }
         localStorage.removeItem(LS_KEYS.session);
@@ -15380,16 +15467,26 @@ function AppInner() {
     );
   }
   if (!authUser) {
-    return <LandingPage onEnter={(_type, _userData) => { if (_userData?.user) { setAuthUser({ ..._userData.user }); if (_userData.invitedBy) setInvitedBy(_userData.invitedBy); try { localStorage.setItem(LS_KEYS.session, JSON.stringify(_userData.user)); _currentUser = _userData.user; _kdActiveUid = _userData.user.uid || null; } catch {} } }} />;
+    return <LandingPage onEnter={(_type, _userData) => {
+      if (_userData?.user) {
+        justSetRef.current = true;
+        setAuthUser({ ..._userData.user });
+        if (_userData.invitedBy) setInvitedBy(_userData.invitedBy);
+        try { localStorage.setItem(LS_KEYS.session, JSON.stringify(_userData.user)); _currentUser = _userData.user; _kdActiveUid = _userData.user.uid || null; } catch {}
+        // Bump appVersion so CapitolApp remounts and reloads fresh user data
+        setAppVersion(v => v + 1);
+      }
+    }} />;
   }
   return (
     <AnimationQueueProvider>
-      <CapitolApp firebaseUid={authUser.uid} invitedBy={invitedBy} onLogout={async () => {
+      <CapitolApp key={appVersion} firebaseUid={authUser.uid} invitedBy={invitedBy} onLogout={async () => {
         await fbLogout();
         _currentUser = null;
         _kdActiveUid = null;
         try { localStorage.removeItem(LS_KEYS.session); } catch {}
         setAuthUser(null);
+        setAppVersion(v => v + 1);
       }} />
     </AnimationQueueProvider>
   );

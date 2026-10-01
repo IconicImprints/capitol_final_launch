@@ -4,8 +4,8 @@ import process from "node:process";
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const env = { ...process.env, NODE_ENV: "development" };
 const children = [
-  spawn(npm, ["run", "dev:api"], { stdio: "inherit", env }),
-  spawn(npm, ["run", "dev:frontend"], { stdio: "inherit", env }),
+  spawn(npm, ["run", "dev:api"], { stdio: "inherit", env, shell: true }),
+  spawn(npm, ["run", "dev:frontend"], { stdio: "inherit", env, shell: true }),
 ];
 
 let stopping = false;

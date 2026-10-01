@@ -7,9 +7,9 @@ const _API = (() => {
   const envUrl = import.meta?.env?.VITE_API_URL;
   if (envUrl) return envUrl;
   const host = window.location.hostname;
-  const p = window.location.port;
+  const p = parseInt(window.location.port || "0", 10);
   // Local Vite dev → talk to API directly; preview/prod → same-origin (Vite proxy or reverse proxy)
-  if ((host === "localhost" || host === "127.0.0.1") && (p === "5173" || p === "5174" || p === "5175")) {
+  if ((host === "localhost" || host === "127.0.0.1") && p >= 5173 && p <= 5179) {
     return "http://localhost:3001";
   }
   return ""; // same-origin - use Vite proxy in preview mode
@@ -42,12 +42,19 @@ async function _api(method, path, body) {
   const url = _API + path;
   const opts = { method, headers: _j() };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "Request failed");
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || "Request failed");
+    }
+    return res.json();
+  } catch (error) {
+    if (error.name === 'TypeError' && error.message === 'fetch failed') {
+      throw new Error('Cannot connect to server. Please ensure the backend is running on port 3001.');
+    }
+    throw error;
   }
-  return res.json();
 }
 const _apiGet = (p) => _api("GET", p);
 const _apiPost = (p, b) => _api("POST", p, b);
@@ -67,16 +74,17 @@ async function uploadFile(file) {
   if (!res.ok || !data.url) throw new Error(data.error || "Image upload failed.");
   console.info("[Capitol upload] upload result", data);
   const imageUrl = String(data.url);
-  // Accept filesystem paths (/uploads/filename.ext) and data URLs
   if (imageUrl.startsWith("blob:")) {
     throw new Error("The server returned a temporary image URL.");
   }
-  // Return the URL as-is if it's already a full path or data URL
   if (imageUrl.startsWith("/") || imageUrl.startsWith("data:")) {
     console.info("[Capitol upload] returning permanent URL", { url: imageUrl });
     return imageUrl;
   }
-  // Otherwise construct a relative path from the API origin
+  if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+    console.info("[Capitol upload] returning CDN URL", { url: imageUrl });
+    return imageUrl;
+  }
   const permanentUrl = new URL(imageUrl, _apiOrigin()).pathname;
   console.info("[Capitol upload] storage path and generated URL", { storagePath: imageUrl, url: permanentUrl });
   return permanentUrl;
@@ -427,10 +435,27 @@ async function fbMarkNotificationRead(ids) {
 }
 
 // ── Leaderboard ──────────────────────────────────────────────────────────
-async function fbGetLeaderboard() {
+async function fbGetLeaderboard(limit = 200) {
   try {
     const res = await _apiGet("/api/leaderboard");
-    return (res.leaderboard || []).map(_mapUser);
+    return (res.leaderboard || []).map(_mapUser).slice(0, limit);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fbGetTrendingRooms(limit = 4) {
+  try {
+    const res = await _apiGet("/api/rooms/trending?limit=" + encodeURIComponent(String(limit)));
+    return (res.rooms || []).map(r => ({
+      id: r.id, name: r.name, icon: r.icon || "bolt", goal: r.goal || "",
+      niche: r.niche || "general", ageRange: r.age_range || null,
+      tags: r.tags || [], max: r.max_members || 8,
+      members: r.member_count || 0, elite: !!r.elite,
+      days: r.days || 30, createdAt: r.created_at,
+      membersList: r.membersList || [],
+      creatorUid: r.creator_uid || null,
+    }));
   } catch (e) {
     return [];
   }
@@ -487,14 +512,17 @@ async function fbDeclineChallenge(challengeId, uid) {
 // ── Moderation ───────────────────────────────────────────────────────────
 async function fbBanUser(uid, targetId, reason) {
   try { await _apiPost("/api/users/" + encodeURIComponent(targetId) + "/ban", { reason }); } catch {}
+  try { if (!window._kdBanCache) window._kdBanCache = {}; window._kdBanCache[targetId] = true; } catch {}
 }
 
 async function fbUnbanUser(uid, targetId) {
   try { await _apiPost("/api/users/" + encodeURIComponent(targetId) + "/unban"); } catch {}
+  try { if (!window._kdBanCache) window._kdBanCache = {}; window._kdBanCache[targetId] = false; } catch {}
 }
 
 async function fbSuspendUser(uid, targetId, hours, reason) {
   try { await _apiPost("/api/users/" + encodeURIComponent(targetId) + "/suspend", { hours, reason }); } catch {}
+  try { if (!window._kdSuspendCache) window._kdSuspendCache = {}; window._kdSuspendCache[targetId] = true; } catch {}
 }
 
 function fbIsBanned(uid) {
@@ -763,7 +791,7 @@ export {
   fbGetRooms, fbGetRoomById, fbGetMyRoom, fbCreateRoom, fbJoinRoom, fbLeaveRoom, fbKickUser,
   fbGetProofs, fbSubmitProof,
   fbGetNotifications, fbCreateNotification, fbMarkNotificationRead,
-  fbGetLeaderboard,
+  fbGetLeaderboard, fbGetTrendingRooms,
   fbFollowUser, fbUnfollowUser,
   fbGetInviterByCode, fbProcessReferral, fbActivateGrace,
   fbGetCloseFriends, fbGetCloseFriendRequests, fbSendCloseFriendRequest, fbRespondCloseFriendRequest, fbRemoveCloseFriend,

@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS users (
   following JSONB DEFAULT '[]',
   premium BOOLEAN DEFAULT FALSE,
   xp_awarded_keys JSONB DEFAULT '{}',
-  CONSTRAINT valid_age_range CHECK (age_range IN ('', '13_17', '18_22', '23_29', '30_39', '40_')),
+  CONSTRAINT valid_age_range CHECK (age_range IN ('', '13_15', '16_18', '19_22', '23_29', '30_plus')),
   CONSTRAINT valid_league CHECK (league IN ('bronze', 'silver', 'gold', 'platinum', 'diamond')),
   CONSTRAINT valid_kick_status CHECK (kick_status IN ('ok', 'warned', 'flagged', 'kicked', 'inactive'))
 );

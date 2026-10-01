@@ -66,7 +66,11 @@ export const authenticate = async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid or expired session' });
     }
 
-    req.user = session;
+    if (!session.users) {
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    req.user = session.users;
     req.token = token;
     
     // Check account status (banned/suspended)
@@ -110,7 +114,7 @@ export const optionalAuth = async (req, res, next) => {
     const session = await validateSession(token);
 
     if (session) {
-      req.user = session;
+      req.user = session.users;
       req.token = token;
     }
     next();

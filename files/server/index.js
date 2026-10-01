@@ -83,7 +83,8 @@ import {
   updateUserKickStatus,
   clearUserKickStatus,
   joinRoomWithChecks,
-  kickUserFromRoom
+  kickUserFromRoom,
+  uploadFileToStorage
 } from './supabaseClient.js';
 import {
   hashPassword,
@@ -126,9 +127,9 @@ app.set('trust proxy', 1);
 app.use(securityHeaders);
 
 // CORS configuration - restrict to specific origins in production
-const corsOrigin = process.env.NODE_ENV === 'production' 
-  ? (process.env.ALLOWED_ORIGINS?.split(',') || ['https://yourdomain.com'])
-  : true; // Allow all origins in development
+const corsOrigin = process.env.NODE_ENV === 'production'
+  ? (process.env.ALLOWED_ORIGINS?.split(',').filter(Boolean) || [])
+  : true;
 
 app.use(cors({ 
   origin: corsOrigin, 
@@ -146,10 +147,10 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   maxAge: '1y', // Cache for 1 year
   etag: true,
   setHeaders: (res, filePath) => {
-    // Set appropriate headers for images
-    if (filePath.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
-      res.setHeader('Content-Type', 'image/jpeg');
-    }
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    const mimeTypes = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
   }
 }));
 
@@ -417,6 +418,14 @@ app.get('/api/users', optionalAuth, async (req, res) => {
   res.json({ users: users.map(publicUser) });
 });
 
+app.get('/api/users/me', authenticate, async (req, res) => {
+  const user = await getUserById(req.user.id);
+  if (!user) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.json({ user: selfUser(user) });
+});
+
 app.get('/api/users/:id', optionalAuth, async (req, res) => {
   const user = await getUserById(req.params.id);
   
@@ -436,7 +445,16 @@ app.patch('/api/users/me', authenticate, async (req, res) => {
   const body = req.body || {};
   const allowed = [
     'display_name', 'photo_url', 'avatar_config', 'banner_url', 'bio', 'pronouns',
-    'timezone', 'social_links', 'niche', 'age_range', 'safety_accepted'
+    'timezone', 'social_links', 'niche', 'age_range', 'safety_accepted',
+    'onboarding_complete', 'onboarding_questions_complete', 'join_timestamp',
+    'room_joined_at', 'room_id',
+    'xp', 'streak', 'level', 'missed_days', 'warned', 'kick_status',
+    'kicked_from_room', 'proofs_count', 'completed_rooms', 'joined_rooms',
+    'last_submit_date', 'last_submission_date', 'grace_active', 'grace_start_date',
+    'grace_days_total', 'total_grace_used', 'onboard_bonus_awarded', 'vulture_claimed',
+    'safety_accepted_at', 'invite_code', 'invites_count', 'burned_at', 'following',
+    'premium', 'xp_awarded_keys', 'consistency_score', 'near_miss_count', 'league',
+    'last_seen_date', 'grace_used_this_month', 'grace_last_month'
   ];
 
   // Moderate display name if present
@@ -529,6 +547,30 @@ app.get('/api/rooms', optionalAuth, async (req, res) => {
   );
 
   res.json({ rooms: roomsWithCounts });
+});
+
+app.get('/api/rooms/trending', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '4'), 20);
+  const rooms = await getAllRooms();
+  const roomsWithCounts = await Promise.all(
+    rooms.map(async (r) => ({
+      id: r.id,
+      name: r.name,
+      icon: r.icon || 'bolt',
+      goal: r.goal || '',
+      niche: r.niche || 'general',
+      age_range: r.age_range || null,
+      tags: r.tags || [],
+      max_members: parseInt(r.max_members) || 8,
+      member_count: await getRoomMemberCount(r.id),
+      elite: !!r.elite,
+      days: parseInt(r.days) || 30,
+      created_at: r.created_at,
+      creator_uid: r.creator_uid || null,
+    }))
+  );
+  roomsWithCounts.sort((a, b) => (b.member_count || 0) - (a.member_count || 0));
+  res.json({ rooms: roomsWithCounts.slice(0, limit) });
 });
 
 app.get('/api/rooms/:id', optionalAuth, async (req, res) => {
@@ -812,6 +854,34 @@ app.post('/api/proofs', authenticate, proofRateLimiter, async (req, res) => {
   } catch (e) {
     console.error('Proof submission error:', e);
     res.status(500).json({ error: 'Proof submission failed' });
+  }
+});
+
+// ── Image Upload ─────────────────────────────────────────────────────────────
+app.post('/api/images/upload', authenticate, upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image file provided' });
+  }
+
+  try {
+    const userId = req.user.id;
+    const file = req.file;
+    const ext = file.originalname.split('.').pop() || 'bin';
+    const fileName = `${userId}_${Date.now()}.${ext}`;
+    const bucket = 'uploads';
+
+    const result = await uploadFileToStorage(
+      file.buffer,
+      fileName,
+      file.mimetype,
+      bucket,
+      userId
+    );
+
+    res.json({ url: result.url, path: result.path });
+  } catch (e) {
+    console.error('Image upload error:', e);
+    res.status(500).json({ error: 'Image upload failed' });
   }
 });
 
@@ -1514,6 +1584,99 @@ app.post('/api/admin/moderation/prohibited-term', authenticate, requireAdmin, as
   }
 });
 
+// ── Challenges ────────────────────────────────────────────────────────────────
+app.get('/api/challenges', authenticate, async (req, res) => {
+  try {
+    const challenges = await getUserChallenges(req.user.id);
+    res.json({ challenges });
+  } catch (e) {
+    console.error('Get challenges error:', e);
+    res.status(500).json({ error: 'Failed to get challenges' });
+  }
+});
+
+app.post('/api/challenges', authenticate, async (req, res) => {
+  const { challengedId, durationDays, stakes, message } = req.body || {};
+  try {
+    if (!challengedId) {
+      return res.status(400).json({ error: 'Missing challengedId' });
+    }
+    const id = rid('challenge');
+    const challenge = await createChallenge({
+      id,
+      from_uid: req.user.id,
+      to_uid: challengedId,
+      duration_days: durationDays || 7,
+      stakes: stakes || 0,
+      message: message || '',
+      status: 'pending',
+      created_at: new Date().toISOString()
+    });
+    res.json({ challenge });
+  } catch (e) {
+    console.error('Create challenge error:', e);
+    res.status(500).json({ error: 'Failed to create challenge' });
+  }
+});
+
+app.post('/api/challenges/:id/accept', authenticate, async (req, res) => {
+  try {
+    await updateChallenge(req.params.id, { status: 'accepted' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Accept challenge error:', e);
+    res.status(500).json({ error: 'Failed to accept challenge' });
+  }
+});
+
+app.post('/api/challenges/:id/decline', authenticate, async (req, res) => {
+  try {
+    await updateChallenge(req.params.id, { status: 'declined' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Decline challenge error:', e);
+    res.status(500).json({ error: 'Failed to decline challenge' });
+  }
+});
+
+// ── User Moderation ───────────────────────────────────────────────────────────
+app.post('/api/users/:id/ban', authenticate, requireAdmin, async (req, res) => {
+  const { reason } = req.body || {};
+  try {
+    await updateUser(req.params.id, { is_banned: true, suspend_reason: reason || 'Banned by admin' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Ban user error:', e);
+    res.status(500).json({ error: 'Failed to ban user' });
+  }
+});
+
+app.post('/api/users/:id/unban', authenticate, requireAdmin, async (req, res) => {
+  try {
+    await updateUser(req.params.id, { is_banned: false, suspend_reason: null });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Unban user error:', e);
+    res.status(500).json({ error: 'Failed to unban user' });
+  }
+});
+
+app.post('/api/users/:id/suspend', authenticate, requireAdmin, async (req, res) => {
+  const { hours, reason } = req.body || {};
+  try {
+    const suspensionEnd = new Date(Date.now() + (hours || 24) * 60 * 60 * 1000).toISOString();
+    await updateUser(req.params.id, {
+      is_suspended: true,
+      suspend_reason: reason || 'Suspended by admin',
+      suspension_end: suspensionEnd
+    });
+    res.json({ ok: true, suspensionEnd });
+  } catch (e) {
+    console.error('Suspend user error:', e);
+    res.status(500).json({ error: 'Failed to suspend user' });
+  }
+});
+
 // Error handling (production-safe)
 app.use((err, req, res, next) => {
   // Log error without exposing sensitive data
@@ -1573,6 +1736,11 @@ async function start() {
     process.exit(1);
   }
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED_REJECTION]', reason);
+  console.error('[UNHANDLED_REJECTION_STACK]', reason && reason.stack);
+});
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {

@@ -33,6 +33,36 @@ async function healthCheck() {
   }
 }
 
+// Upload file to Supabase Storage
+async function uploadFileToStorage(buffer, fileName, contentType, bucket = 'uploads', folder = '') {
+  const filePath = folder ? `${folder}/${Date.now()}_${fileName}` : `${Date.now()}_${fileName}`;
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .upload(filePath, buffer, {
+      contentType,
+      upsert: true,
+    });
+  if (error) throw error;
+  
+  // Get public URL
+  const { data: urlData } = supabase.storage
+    .from(bucket)
+    .getPublicUrl(filePath);
+  
+  return {
+    path: filePath,
+    url: urlData.publicUrl,
+  };
+}
+
+// Delete file from Supabase Storage
+async function deleteFileFromStorage(filePath, bucket = 'uploads') {
+  const { error } = await supabase.storage
+    .from(bucket)
+    .remove([filePath]);
+  if (error) throw error;
+}
+
 // Run migrations (schema is managed in Supabase dashboard)
 async function runMigrations() {
   console.log('[Supabase] Migrations are managed in Supabase dashboard');
@@ -58,9 +88,10 @@ function isDatabaseConnected() {
 // Users
 async function getUserById(id) {
   const { data, error } = await supabase.from('users').select('*').eq('id', id).single();
-  if (error) throw error;
-  if (data && data.xp_awarded_keys !== undefined) {
-    console.log('[Diagnostics] getUserById xp_awarded_keys type:', typeof data.xp_awarded_keys, 'keys:', Object.keys(data.xp_awarded_keys || {}), 'sample:', JSON.stringify(data.xp_awarded_keys).slice(0, 120));
+  if (error) {
+    console.error('[getUserById] failed for', id, 'code=', error.code, 'message=', error.message);
+    if (error && error.code === 'PGRST116') return null;
+    throw error;
   }
   return data;
 }
@@ -308,19 +339,20 @@ async function updateChallenge(id, updates) {
 
 // Close Friends
 async function getCloseFriends(userId) {
-  const { data, error } = await supabase.from('close_friends').select('*, users!close_friends_a_fkey(*), users!close_friends_b_fkey(*)').or(`a.eq.${userId},b.eq.${userId}`);
+  const { data, error } = await supabase.from('close_friends').select('*').or(`a.eq.${userId},b.eq.${userId}`);
   if (error) throw error;
   return data;
 }
 
 async function getCloseFriendRequests(userId) {
-  const { sent, received } = await Promise.all([
+  const results = await Promise.all([
     supabase.from('close_friend_requests').select('*').eq('from_user_id', userId).eq('status', 'pending'),
     supabase.from('close_friend_requests').select('*').eq('to_user_id', userId).eq('status', 'pending')
   ]);
+  const [sent = { data: [], error: null }, received = { data: [], error: null }] = results;
   if (sent.error) throw sent.error;
   if (received.error) throw received.error;
-  return { sent: sent.data, received: received.data };
+  return { sent: sent.data || [], received: received.data || [] };
 }
 
 async function createCloseFriendRequest(requestData) {
@@ -576,9 +608,8 @@ async function query(text, params) {
 async function leaveAllRoomsForUser(userId) {
   const { error } = await supabase
     .from('room_members')
-    .update({ status: 'left', left_at: new Date().toISOString() })
-    .eq('user_id', userId)
-    .eq('status', 'active');
+    .delete()
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -972,5 +1003,7 @@ export {
   updateUserKickStatus,
   clearUserKickStatus,
   joinRoomWithChecks,
-  kickUserFromRoom
+  kickUserFromRoom,
+  uploadFileToStorage,
+  deleteFileFromStorage
 };

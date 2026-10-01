@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:frontend": "vite",
-    "dev:api": "npm --prefix server start",
+    "dev:api": "npm --prefix server run dev",
+    "dev:all": "node scripts/dev.mjs & npm --prefix server run dev",
     "build": "vite build",
     "preview": "vite preview --host",
+    "preview:all": "node scripts/dev.mjs & start /B npx vite preview --host",
     "start": "node scripts/start.mjs",
     "start:api": "npm --prefix server start"
   },

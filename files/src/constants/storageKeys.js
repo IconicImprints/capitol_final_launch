@@ -20,4 +20,4 @@ export const LS_ACHIEVEMENTS = "kd_achievements";
 export const LS_LAST_SEEN_LEVEL = "kd_last_seen_level";
 
 // ── Discord community integration ─────────────────────────────────────────────
-export const DISCORD_INVITE_URL = "https://discord.gg/capitol";
+export const DISCORD_INVITE_URL = "https://discord.gg/ayuUD6QmS";
