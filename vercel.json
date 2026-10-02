@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "cd files && npm install && npm run build",
   "outputDirectory": "files/dist",
-  "installCommand": "cd files && npm install && cd files/server && npm install",
+  "installCommand": "cd files && npm install && cd server && npm install",
   "env": {
     "NODE_ENV": "production"
   },

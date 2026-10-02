@@ -26,3 +26,6 @@ files/server/.env
 .env*
 
 supabase/.temp/
+
+.vercel
+.env*
